@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-firefox/
+build/
+coverage/
+*.log
+tmp-test-extension/
+release/
+.vscode/
+/.claude/*
+!/.claude/skills/
+!/.claude/agents/
+!/.claude/commands/
+.codex/
+.tmp/

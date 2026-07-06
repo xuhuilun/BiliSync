@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extensionName__",
+  "version": "1.2.4",
+  "description": "__MSG_extensionDescription__",
+  "default_locale": "zh_CN",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://www.bilibili.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "__MSG_extensionName__",
+    "default_icon": {
+      "16": "icon-16.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["page-bridge.js"],
+      "matches": ["https://www.bilibili.com/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/video/*",
+        "https://www.bilibili.com/bangumi/play/*",
+        "https://www.bilibili.com/festival/*",
+        "https://www.bilibili.com/list/watchlater*",
+        "https://www.bilibili.com/medialist/play/watchlater*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

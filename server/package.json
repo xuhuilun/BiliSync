@@ -1,0 +1,29 @@
+{
+  "name": "@bili-syncplay/server",
+  "version": "1.2.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretypecheck": "npm --prefix ../packages/protocol run build",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "pretest": "npm --prefix ../packages/protocol run build",
+    "test": "tsx --test test/**/*.ts",
+    "pretest:e2e": "npm --prefix ../packages/protocol run build",
+    "test:e2e": "tsx --test test/e2e-smoke.test.ts",
+    "coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='admin-ui/**' --test-coverage-exclude='../bench/**' --test-coverage-exclude='../packages/**' test/**/*.ts",
+    "test:redis": "node scripts/run-redis-test.mjs"
+  },
+  "dependencies": {
+    "@bili-syncplay/protocol": "1.2.4",
+    "ioredis": "^5.10.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.3"
+  }
+}
