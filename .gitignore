@@ -13,3 +13,4 @@ release/
 !/.claude/commands/
 .codex/
 .tmp/
+.bili-syncplay/

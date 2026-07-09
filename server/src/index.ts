@@ -4,6 +4,7 @@ import {
   loadRuntimeConfig,
 } from "./config/runtime-config.js";
 import { logEffectiveOriginPolicy } from "./config/security-config.js";
+import { createFileWebAuthSessionStore } from "./web-routes.js";
 
 const {
   port,
@@ -26,6 +27,9 @@ const { httpServer, metricsHttpServer } = await createSyncServer(
     adminUiConfig,
     logLevel,
     metricsPort,
+    webRouteDependencies: {
+      authSessionStore: createFileWebAuthSessionStore(),
+    },
   },
 );
 httpServer.listen(port, () => {

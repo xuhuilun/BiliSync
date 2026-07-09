@@ -29,6 +29,7 @@ import {
   sendError,
 } from "./ws-session-handler.js";
 import type { AdminSessionStore } from "./admin-session-store.js";
+import type { WebRouteDependencies } from "./web-routes.js";
 import type {
   AdminConfig,
   AdminUiConfig,
@@ -76,6 +77,7 @@ export type SyncServerDependencies = {
   logSampling?: Record<string, number>;
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
+  webRouteDependencies?: WebRouteDependencies;
 };
 
 export async function createSyncServer(
@@ -287,6 +289,7 @@ export async function createSyncServer(
     serviceVersion,
     metricsPort: dependencies.metricsPort,
     adminSessionStoreOverride: dependencies.adminSessionStoreOverride,
+    webRouteDependencies: dependencies.webRouteDependencies,
   });
 
   const wss = new WebSocketServer({

@@ -99,6 +99,7 @@ type QrStartResponse = {
 const PLAYING_SYNC_DRIFT_SECONDS = 0.65;
 const PAUSED_SYNC_DRIFT_SECONDS = 0.25;
 const AUTO_ALIGN_INTERVAL_MS = 1000;
+const REMOTE_APPLY_SUPPRESSION_MS = 1000;
 
 function buildWsUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined;
@@ -277,6 +278,7 @@ export default function App() {
   const sessionRef = useRef<RoomSession | null>(null);
   const roomStateRef = useRef<RoomState | null>(null);
   const applyingRemoteRef = useRef(false);
+  const suppressLocalPlaybackEventsUntilRef = useRef(0);
   const autoplayAfterResolveRef = useRef(false);
   const pendingJoinTokenRef = useRef("");
   const roomParseTimerRef = useRef<number | null>(null);
@@ -290,6 +292,31 @@ export default function App() {
   useEffect(() => {
     roomStateRef.current = roomState;
   }, [roomState]);
+
+  const sharedVideoSourceKey = useMemo(() => {
+    const sharedVideo = roomState?.sharedVideo;
+    if (!sharedVideo) {
+      return null;
+    }
+    return [
+      sharedVideo.sourceProvider,
+      sharedVideo.sourceRef,
+      sharedVideo.videoId,
+      sharedVideo.url,
+    ].join("|");
+  }, [
+    roomState?.sharedVideo?.sourceProvider,
+    roomState?.sharedVideo?.sourceRef,
+    roomState?.sharedVideo?.videoId,
+    roomState?.sharedVideo?.url,
+  ]);
+
+  const sessionKey = useMemo(() => {
+    if (!session) {
+      return null;
+    }
+    return `${session.roomCode}:${session.memberToken}`;
+  }, [session?.memberToken, session?.roomCode]);
 
   const showRoomParseMessage = useCallback((message: string) => {
     if (roomParseTimerRef.current !== null) {
@@ -687,8 +714,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const currentSession = session;
-    const sharedVideo = roomState?.sharedVideo;
+    const currentSession = sessionRef.current;
+    const sharedVideo = roomStateRef.current?.sharedVideo;
     if (
       !currentSession ||
       !sharedVideo ||
@@ -701,7 +728,7 @@ export default function App() {
     void loadPlaybackSource(currentSession).catch((reason: unknown) => {
       setError(reason instanceof Error ? reason.message : "无法加载播放源");
     });
-  }, [loadPlaybackSource, roomState?.sharedVideo, session]);
+  }, [loadPlaybackSource, sessionKey, sharedVideoSourceKey]);
 
   const shareVideo = useCallback(async () => {
     const currentSession = sessionRef.current;
@@ -747,7 +774,7 @@ export default function App() {
           video: payload.data.video,
           playback: {
             url: payload.data.video.url,
-            currentTime: videoElement?.currentTime ?? 0,
+            currentTime: 0,
             playState: "playing",
             playbackRate: videoElement?.playbackRate ?? 1,
             updatedAt: Date.now(),
@@ -831,7 +858,8 @@ export default function App() {
         !video ||
         !currentSession ||
         !sharedVideo ||
-        applyingRemoteRef.current
+        applyingRemoteRef.current ||
+        Date.now() < suppressLocalPlaybackEventsUntilRef.current
       ) {
         return;
       }
@@ -869,33 +897,61 @@ export default function App() {
       if (!video) {
         return;
       }
-      applyingRemoteRef.current = true;
-      video.playbackRate = playback.playbackRate;
-
       const targetTime = expectedCurrentTime(playback);
       const driftLimit =
         playback.playState === "playing"
           ? PLAYING_SYNC_DRIFT_SECONDS
           : PAUSED_SYNC_DRIFT_SECONDS;
-      if (
+      const canSeek = video.readyState > HTMLMediaElement.HAVE_NOTHING;
+      if (!canSeek && Number.isFinite(targetTime) && targetTime > 0.25) {
+        return;
+      }
+
+      const shouldSeek =
+        canSeek &&
         Number.isFinite(targetTime) &&
-        (force || Math.abs(video.currentTime - targetTime) > driftLimit)
+        (force || Math.abs(video.currentTime - targetTime) > driftLimit);
+      const shouldUpdateRate =
+        Math.abs(video.playbackRate - playback.playbackRate) > 0.001;
+      const shouldPlay = playback.playState === "playing" && video.paused;
+      const shouldPause = playback.playState !== "playing" && !video.paused;
+
+      if (
+        !shouldSeek &&
+        !shouldUpdateRate &&
+        !shouldPlay &&
+        !shouldPause
       ) {
+        return;
+      }
+
+      applyingRemoteRef.current = true;
+      suppressLocalPlaybackEventsUntilRef.current = Math.max(
+        suppressLocalPlaybackEventsUntilRef.current,
+        Date.now() + REMOTE_APPLY_SUPPRESSION_MS,
+      );
+
+      if (shouldUpdateRate) {
+        video.playbackRate = playback.playbackRate;
+      }
+      if (shouldSeek) {
         video.currentTime = Math.max(0, targetTime);
       }
 
-      if (playback.playState === "playing") {
+      if (shouldPlay) {
         try {
           await video.play();
         } catch {
           setError("浏览器阻止了自动播放，请点击一次播放器");
         }
-      } else {
+      } else if (shouldPause) {
         video.pause();
       }
       window.setTimeout(() => {
-        applyingRemoteRef.current = false;
-      }, 180);
+        if (Date.now() >= suppressLocalPlaybackEventsUntilRef.current) {
+          applyingRemoteRef.current = false;
+        }
+      }, REMOTE_APPLY_SUPPRESSION_MS);
     },
     [],
   );

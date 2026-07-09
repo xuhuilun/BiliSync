@@ -27,7 +27,11 @@ export function createHttpRequestHandler(args: {
   webUiConfig?: WebUiConfig;
   now?: () => number;
 }) {
-  const webRouteState = args.webRouteState ?? createWebRouteState();
+  const webRouteState =
+    args.webRouteState ??
+    createWebRouteState({
+      authSessionStore: args.webRouteDependencies?.authSessionStore,
+    });
   return async (
     request: IncomingMessage,
     response: ServerResponse,
@@ -159,6 +163,16 @@ export function createHttpRequestHandler(args: {
         JSON.stringify({ ok: true, service: "bili-syncplay-server" }),
       );
     } catch {
+      if (
+        response.headersSent ||
+        response.destroyed ||
+        response.writableEnded
+      ) {
+        if (!response.destroyed && !response.writableEnded) {
+          response.destroy();
+        }
+        return;
+      }
       response.writeHead(500, { "content-type": "application/json" });
       response.end(
         JSON.stringify({

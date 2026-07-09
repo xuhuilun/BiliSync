@@ -413,7 +413,7 @@ test("background share controller reports missing member token without queuing a
 
   assert.deepEqual(result, {
     ok: false,
-    error: "Member token is missing. Rejoin the room.",
+    error: "成员令牌缺失，请重新加入房间。",
   });
   assert.deepEqual(harness.rememberedSharedTabs, [
     {

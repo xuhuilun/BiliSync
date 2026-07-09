@@ -242,9 +242,9 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       true,
     );
 
-    const root = await requestJson(server.httpBaseUrl, "/");
+    const root = await requestText(server.httpBaseUrl, "/");
     assert.equal(root.status, 200);
-    assert.equal(root.body.ok, true);
+    assert.equal(root.body.includes("<!doctype html>"), true);
 
     const connectionCheck = await fetch(
       `${server.httpBaseUrl}/api/connection-check`,

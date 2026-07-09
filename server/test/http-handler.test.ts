@@ -8,7 +8,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createHttpRequestHandler } from "../src/bootstrap/http-handler.js";
 import { createSecurityPolicy } from "../src/security.js";
-import type { BilibiliFetch } from "../src/web-routes.js";
+import {
+  createFileWebAuthSessionStore,
+  type BilibiliFetch,
+} from "../src/web-routes.js";
 
 function createRequest(args: {
   url: string;
@@ -42,6 +45,7 @@ function createResponse() {
     statusCode = 0;
     headers: Record<string, string> = {};
     body = "";
+    headersSent = false;
 
     _write(
       chunk: Buffer | string,
@@ -53,6 +57,10 @@ function createResponse() {
     }
 
     writeHead(statusCode: number, headers: Record<string, string>) {
+      if (this.headersSent) {
+        throw new Error("ERR_HTTP_HEADERS_SENT");
+      }
+      this.headersSent = true;
       this.statusCode = statusCode;
       this.headers = headers;
       return this;
@@ -613,6 +621,116 @@ test("web bilibili QR login stores authorized cookie server-side", async () => {
         call.cookie === "SESSDATA=abc; bili_jct=csrf",
     ),
   );
+});
+
+test("web bilibili auth session survives a fresh server handler through the persisted cookie token", async () => {
+  const authRoot = await mkdtemp(join(tmpdir(), "bili-sync-auth-"));
+  const authStore = createFileWebAuthSessionStore(join(authRoot, "auth.json"));
+  const fetchImpl: BilibiliFetch = async (url, init) => {
+    if (url.includes("/x/passport-login/web/qrcode/generate")) {
+      return qrGenerateFetch();
+    }
+    if (url.includes("/x/passport-login/web/qrcode/poll")) {
+      return qrPollSuccessFetch();
+    }
+    assert.equal(
+      init?.headers?.cookie,
+      "SESSDATA=abc; bili_jct=csrf",
+    );
+    return jsonFetch({
+      code: 0,
+      data: {
+        isLogin: true,
+        uname: "Alice",
+        face: "https://i0.hdslb.com/bfs/face/alice.jpg",
+      },
+    });
+  };
+  const createPersistentHandler = () =>
+    createHttpRequestHandler({
+      adminRouter: {
+        handle: async () => false,
+      },
+      securityPolicy: createSecurityPolicy({
+        allowedOrigins: ["chrome-extension://allowed"],
+        allowMissingOriginInDev: false,
+        connectionAttemptsPerMinute: 10,
+        maxConnectionsPerIp: 5,
+        maxMembersPerRoom: 2,
+        trustedProxyAddresses: [],
+        rateLimits: {
+          roomCreatePerMinute: 5,
+          roomJoinPerMinute: 10,
+          videoSharePerMinute: 20,
+          playbackUpdatePerSecond: 30,
+          profileUpdatePerMinute: 20,
+          syncPingPerMinute: 30,
+          syncPingBurst: 5,
+        },
+      }),
+      webRouteDependencies: {
+        authSessionStore: authStore,
+        createToken: () => "auth-token-123456",
+        fetch: fetchImpl,
+      },
+    });
+
+  try {
+    await completeQrLogin(createPersistentHandler());
+
+    const restoredResponse = createResponse();
+    await createPersistentHandler()(
+      createRequest({
+        url: "/api/web/auth/bilibili/login/status",
+        method: "GET",
+        origin: "chrome-extension://allowed",
+        cookie: "bili_sync_auth=auth-token-123456",
+      }),
+      restoredResponse,
+    );
+
+    assert.equal(restoredResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(restoredResponse.body), {
+      ok: true,
+      data: {
+        loggedIn: true,
+        displayName: "Alice",
+        avatarUrl: "https://i0.hdslb.com/bfs/face/alice.jpg",
+      },
+    });
+
+    const logoutResponse = createResponse();
+    await createPersistentHandler()(
+      createRequest({
+        url: "/api/web/auth/bilibili/logout",
+        method: "POST",
+        origin: "chrome-extension://allowed",
+        cookie: "bili_sync_auth=auth-token-123456",
+      }),
+      logoutResponse,
+    );
+    assert.equal(logoutResponse.statusCode, 200);
+
+    const afterLogoutResponse = createResponse();
+    await createPersistentHandler()(
+      createRequest({
+        url: "/api/web/auth/bilibili/login/status",
+        method: "GET",
+        origin: "chrome-extension://allowed",
+        cookie: "bili_sync_auth=auth-token-123456",
+      }),
+      afterLogoutResponse,
+    );
+    assert.equal(afterLogoutResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(afterLogoutResponse.body), {
+      ok: true,
+      data: {
+        loggedIn: false,
+      },
+    });
+  } finally {
+    await rm(authRoot, { recursive: true, force: true });
+  }
 });
 
 test("web bilibili resolve accepts BV input and returns proxied playback source", async () => {
@@ -1292,6 +1410,123 @@ test("web bilibili media proxy forwards range requests and streams partial conte
       range: "bytes=0-3",
     },
   ]);
+});
+
+test("web bilibili media proxy does not send a second response when streaming fails after headers", async () => {
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+            },
+          });
+        }
+        if (url.includes("/x/player/playurl")) {
+          return jsonFetch({
+            code: 0,
+            data: { durl: [{ url: "https://upos.example.test/video.mp4" }] },
+          });
+        }
+        const body = Buffer.from("partial");
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body);
+              controller.error(new Error("upstream stream failed"));
+            },
+          }),
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-type" ? "video/mp4" : null,
+          },
+          json: async () => ({}),
+          arrayBuffer: async () =>
+            body.buffer.slice(
+              body.byteOffset,
+              body.byteOffset + body.byteLength,
+            ),
+        };
+      },
+    },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async (roomCode, memberToken) =>
+        roomCode === "ABC123" && memberToken === "member-token",
+    },
+  });
+  await completeQrLogin(handler);
+  const resolveResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    resolveResponse,
+  );
+
+  const response = createResponse();
+  await assert.doesNotReject(() =>
+    handler(
+      createRequest({
+        url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+        method: "GET",
+        origin: "chrome-extension://allowed",
+      }),
+      response,
+    ),
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "video/mp4");
+  assert.equal(response.body.includes("internal_error"), false);
+  assert.equal(response.destroyed, true);
 });
 
 test("web playback source requires a current room member token", async () => {

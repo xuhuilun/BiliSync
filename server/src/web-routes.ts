@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { dirname, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
@@ -19,6 +21,7 @@ const BILIBILI_QR_LOGIN_TTL_MS = 180 * 1000;
 const MAX_JSON_BODY_BYTES = 16 * 1024;
 const MAX_TITLE_LENGTH = 128;
 const AUTH_COOKIE_NAME = "bili_sync_auth";
+const DEFAULT_AUTH_SESSION_STORE_PATH = ".bili-syncplay/web-auth-sessions.json";
 const BILIBILI_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
@@ -49,17 +52,23 @@ export type BilibiliFetch = (
   },
 ) => Promise<BilibiliFetchResponse>;
 
-export type WebRouteDependencies = {
-  fetch?: BilibiliFetch;
-  createToken?: () => string;
-};
-
-type BilibiliAuthSession = {
+export type BilibiliAuthSession = {
   id: string;
   cookie: string;
   displayName: string;
   avatarUrl?: string;
   expiresAt: number;
+};
+
+export type WebAuthSessionStore = {
+  load: () => Promise<BilibiliAuthSession[]>;
+  save: (sessions: BilibiliAuthSession[]) => Promise<void>;
+};
+
+export type WebRouteDependencies = {
+  fetch?: BilibiliFetch;
+  createToken?: () => string;
+  authSessionStore?: WebAuthSessionStore;
 };
 
 type BilibiliQrLoginSession = {
@@ -77,6 +86,8 @@ type BilibiliMediaToken = {
 
 export type WebRouteState = {
   authSessions: Map<string, BilibiliAuthSession>;
+  authSessionsLoaded: boolean;
+  authSessionStore?: WebAuthSessionStore;
   qrLoginSessions: Map<string, BilibiliQrLoginSession>;
   mediaTokens: Map<string, BilibiliMediaToken>;
   sourceAuthSessions: Map<string, string>;
@@ -112,9 +123,84 @@ function defaultFetch(
   return fetch(url, init) as Promise<BilibiliFetchResponse>;
 }
 
-export function createWebRouteState(): WebRouteState {
+function readPersistedAuthSession(value: unknown): BilibiliAuthSession | null {
+  const record = readRecord(value);
+  if (!record) {
+    return null;
+  }
+  const id = record.id;
+  const cookie = record.cookie;
+  const displayName = record.displayName;
+  const avatarUrl = record.avatarUrl;
+  const expiresAt = record.expiresAt;
+  if (
+    typeof id !== "string" ||
+    typeof cookie !== "string" ||
+    typeof displayName !== "string" ||
+    typeof expiresAt !== "number" ||
+    !Number.isFinite(expiresAt)
+  ) {
+    return null;
+  }
+  return {
+    id,
+    cookie,
+    displayName,
+    ...(typeof avatarUrl === "string" ? { avatarUrl } : {}),
+    expiresAt,
+  };
+}
+
+export function createFileWebAuthSessionStore(
+  filePath = DEFAULT_AUTH_SESSION_STORE_PATH,
+): WebAuthSessionStore {
+  const resolvedPath = resolve(filePath);
+  return {
+    async load() {
+      let raw: string;
+      try {
+        raw = await readFile(resolvedPath, "utf8");
+      } catch (error) {
+        if (
+          error &&
+          typeof error === "object" &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          return [];
+        }
+        throw error;
+      }
+      const payload = readRecord(JSON.parse(raw));
+      const sessions = Array.isArray(payload?.sessions)
+        ? payload.sessions
+        : [];
+      return sessions
+        .map(readPersistedAuthSession)
+        .filter((session): session is BilibiliAuthSession => session !== null);
+    },
+    async save(sessions) {
+      await mkdir(dirname(resolvedPath), { recursive: true });
+      const temporaryPath = `${resolvedPath}.tmp`;
+      await writeFile(
+        temporaryPath,
+        `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`,
+        "utf8",
+      );
+      await rename(temporaryPath, resolvedPath);
+    },
+  };
+}
+
+export function createWebRouteState(args: {
+  authSessionStore?: WebAuthSessionStore;
+} = {}): WebRouteState {
   return {
     authSessions: new Map(),
+    authSessionsLoaded: !args.authSessionStore,
+    ...(args.authSessionStore
+      ? { authSessionStore: args.authSessionStore }
+      : {}),
     qrLoginSessions: new Map(),
     mediaTokens: new Map(),
     sourceAuthSessions: new Map(),
@@ -202,10 +288,16 @@ async function pipeMediaProxyResponse(args: {
   }
 
   args.response.writeHead(statusCode, headers);
-  await pipeline(
-    Readable.fromWeb(args.upstream.body as NodeReadableStream<Uint8Array>),
-    args.response,
-  );
+  try {
+    await pipeline(
+      Readable.fromWeb(args.upstream.body as NodeReadableStream<Uint8Array>),
+      args.response,
+    );
+  } catch {
+    if (!args.response.destroyed && !args.response.writableEnded) {
+      args.response.destroy();
+    }
+  }
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -351,11 +443,50 @@ function readCookie(request: IncomingMessage, name: string): string | null {
   return null;
 }
 
-function getAuthSession(
+async function hydrateAuthSessions(
+  state: WebRouteState,
+  currentTime: number,
+): Promise<void> {
+  if (state.authSessionsLoaded) {
+    return;
+  }
+  state.authSessionsLoaded = true;
+  if (!state.authSessionStore) {
+    return;
+  }
+  const sessions = await state.authSessionStore.load();
+  let changed = false;
+  for (const session of sessions) {
+    if (session.expiresAt <= currentTime) {
+      changed = true;
+      continue;
+    }
+    state.authSessions.set(session.id, session);
+  }
+  if (changed) {
+    await persistAuthSessions(state, currentTime);
+  }
+}
+
+async function persistAuthSessions(
+  state: WebRouteState,
+  currentTime: number,
+): Promise<void> {
+  if (!state.authSessionStore) {
+    return;
+  }
+  const sessions = [...state.authSessions.values()].filter(
+    (session) => session.expiresAt > currentTime,
+  );
+  await state.authSessionStore.save(sessions);
+}
+
+async function getAuthSession(
   request: IncomingMessage,
   state: WebRouteState,
   currentTime: number,
-): BilibiliAuthSession | null {
+): Promise<BilibiliAuthSession | null> {
+  await hydrateAuthSessions(state, currentTime);
   const token = readCookie(request, AUTH_COOKIE_NAME);
   if (!token) {
     return null;
@@ -363,6 +494,7 @@ function getAuthSession(
   const session = state.authSessions.get(token) ?? null;
   if (!session || session.expiresAt <= currentTime) {
     state.authSessions.delete(token);
+    await persistAuthSessions(state, currentTime);
     return null;
   }
   return session;
@@ -1056,13 +1188,15 @@ async function handleBilibiliQrLoginStatus(args: {
     });
     const token = args.createToken();
     args.state.qrLoginSessions.delete(args.qrcodeKey);
-    args.state.authSessions.set(token, {
+    const authSession: BilibiliAuthSession = {
       id: token,
       cookie,
       displayName: profile.displayName,
       ...(profile.avatarUrl ? { avatarUrl: profile.avatarUrl } : {}),
       expiresAt: args.now() + BILIBILI_AUTH_SESSION_TTL_MS,
-    });
+    };
+    args.state.authSessions.set(token, authSession);
+    await persistAuthSessions(args.state, args.now());
     writeJson(
       args.response,
       200,
@@ -1117,7 +1251,7 @@ async function handleBilibiliLoginStatus(args: {
     });
     return;
   }
-  const session = getAuthSession(args.request, args.state, args.now());
+  const session = await getAuthSession(args.request, args.state, args.now());
   writeJson(args.response, 200, {
     ok: true,
     data: session
@@ -1132,18 +1266,21 @@ async function handleBilibiliLoginStatus(args: {
   });
 }
 
-function handleBilibiliLogout(args: {
+async function handleBilibiliLogout(args: {
   request: IncomingMessage;
   response: ServerResponse;
   state: WebRouteState;
-}): void {
+  now: () => number;
+}): Promise<void> {
   if (args.request.method !== "POST") {
     writeError(args.response, 405, "method_not_allowed", "Method not allowed.");
     return;
   }
   const token = readCookie(args.request, AUTH_COOKIE_NAME);
   if (token) {
+    await hydrateAuthSessions(args.state, args.now());
     args.state.authSessions.delete(token);
+    await persistAuthSessions(args.state, args.now());
   }
   writeJson(
     args.response,
@@ -1207,7 +1344,11 @@ async function handleVideoResolve(args: {
       );
       return;
     }
-    const authSession = getAuthSession(args.request, args.state, args.now());
+    const authSession = await getAuthSession(
+      args.request,
+      args.state,
+      args.now(),
+    );
     if (!authSession) {
       writeError(
         args.response,
@@ -1350,9 +1491,10 @@ async function handlePlaybackSource(args: {
   const authSessionId = args.state.sourceAuthSessions.get(
     sharedVideo.sourceRef,
   );
+  await hydrateAuthSessions(args.state, args.now());
   const authSession = authSessionId
     ? (args.state.authSessions.get(authSessionId) ?? null)
-    : getAuthSession(args.request, args.state, args.now());
+    : await getAuthSession(args.request, args.state, args.now());
   if (!sourceInfo || !authSession || authSession.expiresAt <= args.now()) {
     writeError(
       args.response,
@@ -1467,7 +1609,11 @@ export async function tryHandleWebRoutes(args: {
   state?: WebRouteState;
   dependencies?: WebRouteDependencies;
 }): Promise<boolean> {
-  const state = args.state ?? createWebRouteState();
+  const state =
+    args.state ??
+    createWebRouteState({
+      authSessionStore: args.dependencies?.authSessionStore,
+    });
   const fetchImpl = args.dependencies?.fetch ?? defaultFetch;
   const createToken = args.dependencies?.createToken ?? defaultCreateToken;
   const now = args.now ?? Date.now;
@@ -1496,10 +1642,11 @@ export async function tryHandleWebRoutes(args: {
   }
 
   if (args.pathname === "/api/web/auth/bilibili/logout") {
-    handleBilibiliLogout({
+    await handleBilibiliLogout({
       request: args.request,
       response: args.response,
       state,
+      now,
     });
     return true;
   }

@@ -21,6 +21,7 @@ import type {
   SecurityConfig,
 } from "../types.js";
 import type { RuntimeStore } from "../runtime-store.js";
+import type { WebRouteDependencies } from "../web-routes.js";
 import { createAdminServices } from "./admin-services.js";
 import { createHttpRequestHandler } from "./http-handler.js";
 import { createMetricsRequestHandler } from "./metrics-handler.js";
@@ -62,6 +63,7 @@ export async function createSharedAdminHttpBootstrap(args: {
   createRoomQueryService?: typeof createAdminRoomQueryService;
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
+  webRouteDependencies?: WebRouteDependencies;
 }): Promise<{
   securityPolicy: ReturnType<typeof createSecurityPolicy>;
   httpServer: HttpServer;
@@ -110,6 +112,7 @@ export async function createSharedAdminHttpBootstrap(args: {
       securityPolicy,
       adminUiConfig: args.adminUiConfig,
       metricsEnabled: metricsOnMain,
+      webRouteDependencies: args.webRouteDependencies,
       webRoomService: {
         getRoom: (roomCode) => args.roomStore.getRoom(roomCode),
         isMemberTokenInRoom: (roomCode, memberToken) =>
