@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import {
   normalizeBilibiliUrl,
   parseBilibiliVideoRef,
@@ -34,6 +37,7 @@ export type BilibiliFetchResponse = {
     get: (name: string) => string | null;
     getSetCookie?: () => string[];
   };
+  body?: NodeReadableStream<Uint8Array> | null;
   json: () => Promise<unknown>;
   arrayBuffer: () => Promise<ArrayBuffer>;
 };
@@ -146,17 +150,62 @@ function writeError(
   });
 }
 
-function writeBinary(
+function writeBuffer(
   response: ServerResponse,
   statusCode: number,
-  body: ArrayBuffer,
-  contentType: string,
+  body: ArrayBuffer | Buffer,
+  headers: Record<string, string>,
 ): void {
   response.writeHead(statusCode, {
-    "content-type": contentType,
     "cache-control": "private, max-age=60",
+    ...headers,
   });
-  response.end(Buffer.from(body));
+  response.end(
+    Buffer.isBuffer(body) ? body : Buffer.from(new Uint8Array(body)),
+  );
+}
+
+function createMediaProxyResponseHeaders(
+  upstreamHeaders: BilibiliFetchResponse["headers"],
+): Record<string, string> {
+  const responseHeaders: Record<string, string> = {
+    "cache-control": "private, max-age=60",
+  };
+  for (const headerName of [
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+  ]) {
+    const value = upstreamHeaders.get(headerName);
+    if (value) {
+      responseHeaders[headerName] = value;
+    }
+  }
+  return responseHeaders;
+}
+
+async function pipeMediaProxyResponse(args: {
+  response: ServerResponse;
+  upstream: BilibiliFetchResponse;
+}): Promise<void> {
+  const statusCode = args.upstream.status === 206 ? 206 : 200;
+  const headers = createMediaProxyResponseHeaders(args.upstream.headers);
+  if (!args.upstream.body) {
+    writeBuffer(
+      args.response,
+      statusCode,
+      await args.upstream.arrayBuffer(),
+      headers,
+    );
+    return;
+  }
+
+  args.response.writeHead(statusCode, headers);
+  await pipeline(
+    Readable.fromWeb(args.upstream.body as NodeReadableStream<Uint8Array>),
+    args.response,
+  );
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -1393,19 +1442,20 @@ async function handleMediaProxy(args: {
     return;
   }
 
-  const upstream = await args.fetchImpl(token.url, {
-    headers: buildBilibiliHeaders(token.cookie, token.referer),
-  });
+  const headers = buildBilibiliHeaders(token.cookie, token.referer);
+  const range = args.request.headers.range;
+  if (typeof range === "string") {
+    headers.range = range;
+  }
+  const upstream = await args.fetchImpl(token.url, { headers });
   if (!upstream.ok) {
     writeError(args.response, 502, "media_proxy_failed", "Media proxy failed.");
     return;
   }
-  writeBinary(
-    args.response,
-    200,
-    await upstream.arrayBuffer(),
-    upstream.headers.get("content-type") ?? "application/octet-stream",
-  );
+  await pipeMediaProxyResponse({
+    response: args.response,
+    upstream,
+  });
 }
 
 export async function tryHandleWebRoutes(args: {

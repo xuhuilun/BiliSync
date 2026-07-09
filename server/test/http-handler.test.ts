@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Writable } from "node:stream";
 import test from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createInMemoryRoomStore } from "../src/room-store.js";
@@ -14,6 +15,7 @@ function createRequest(args: {
   method?: string;
   origin?: string | null;
   cookie?: string;
+  range?: string;
   body?: string;
 }) {
   return {
@@ -22,6 +24,7 @@ function createRequest(args: {
     headers: {
       ...(args.origin ? { origin: args.origin } : {}),
       ...(args.cookie ? { cookie: args.cookie } : {}),
+      ...(args.range ? { range: args.range } : {}),
     },
     socket: {
       remoteAddress: "127.0.0.1",
@@ -35,20 +38,36 @@ function createRequest(args: {
 }
 
 function createResponse() {
-  return {
-    statusCode: 0,
-    headers: {} as Record<string, string>,
-    body: "",
+  class TestResponse extends Writable {
+    statusCode = 0;
+    headers: Record<string, string> = {};
+    body = "";
+
+    _write(
+      chunk: Buffer | string,
+      _encoding: BufferEncoding,
+      callback: (error?: Error | null) => void,
+    ) {
+      this.body += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+      callback();
+    }
+
     writeHead(statusCode: number, headers: Record<string, string>) {
       this.statusCode = statusCode;
       this.headers = headers;
       return this;
-    },
+    }
+
     end(body?: string | Buffer) {
-      this.body = Buffer.isBuffer(body) ? body.toString("utf8") : (body ?? "");
+      if (body !== undefined) {
+        this.body += Buffer.isBuffer(body) ? body.toString("utf8") : body;
+      }
+      super.end();
       return this;
-    },
-  } as unknown as ServerResponse & {
+    }
+  }
+
+  return new TestResponse() as unknown as ServerResponse & {
     statusCode: number;
     headers: Record<string, string>;
     body: string;
@@ -76,6 +95,12 @@ function bytesFetch(
   return {
     ok: true,
     status: 200,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(buffer);
+        controller.close();
+      },
+    }),
     headers: {
       get: (name: string) =>
         name.toLowerCase() === "content-type" ? contentType : null,
@@ -1126,6 +1151,147 @@ test("web bilibili media proxy streams bytes for current room members", async ()
   assert.equal(response.headers["content-type"], "video/mp4");
   assert.equal(response.body, "video-bytes");
   assert.deepEqual(fetchedMediaUrls, ["https://upos.example.test/video.mp4"]);
+});
+
+test("web bilibili media proxy forwards range requests and streams partial content", async () => {
+  const mediaFetchCalls: Array<{ url: string; range?: string }> = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url, init) => {
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+            },
+          });
+        }
+        if (url.includes("/x/player/playurl")) {
+          return jsonFetch({
+            code: 0,
+            data: { durl: [{ url: "https://upos.example.test/video.mp4" }] },
+          });
+        }
+        mediaFetchCalls.push({
+          url,
+          range: init?.headers?.range,
+        });
+        const body = Buffer.from("part");
+        return {
+          ok: true,
+          status: 206,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body);
+              controller.close();
+            },
+          }),
+          headers: {
+            get: (name: string) => {
+              switch (name.toLowerCase()) {
+                case "content-type":
+                  return "video/mp4";
+                case "content-length":
+                  return "4";
+                case "content-range":
+                  return "bytes 0-3/100";
+                case "accept-ranges":
+                  return "bytes";
+                default:
+                  return null;
+              }
+            },
+          },
+          json: async () => ({}),
+          arrayBuffer: async () =>
+            body.buffer.slice(
+              body.byteOffset,
+              body.byteOffset + body.byteLength,
+            ),
+        };
+      },
+    },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async (roomCode, memberToken) =>
+        roomCode === "ABC123" && memberToken === "member-token",
+    },
+  });
+  await completeQrLogin(handler);
+  const resolveResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    resolveResponse,
+  );
+
+  const response = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+      range: "bytes=0-3",
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 206);
+  assert.equal(response.headers["content-type"], "video/mp4");
+  assert.equal(response.headers["content-length"], "4");
+  assert.equal(response.headers["content-range"], "bytes 0-3/100");
+  assert.equal(response.headers["accept-ranges"], "bytes");
+  assert.equal(response.body, "part");
+  assert.deepEqual(mediaFetchCalls, [
+    {
+      url: "https://upos.example.test/video.mp4",
+      range: "bytes=0-3",
+    },
+  ]);
 });
 
 test("web playback source requires a current room member token", async () => {
