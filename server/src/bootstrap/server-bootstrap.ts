@@ -207,7 +207,7 @@ export function getDefaultSecurityConfig(): SecurityConfig {
     trustedProxyAddresses: [],
     maxConnectionsPerIp: 10,
     connectionAttemptsPerMinute: 20,
-    maxMembersPerRoom: 8,
+    maxMembersPerRoom: 2,
     maxMessageBytes: 8 * 1024,
     invalidMessageCloseThreshold: 3,
     wsHeartbeatEnabled: true,

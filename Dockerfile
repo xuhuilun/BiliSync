@@ -8,6 +8,7 @@ COPY package.json package-lock.json ./
 COPY packages/protocol/package.json packages/protocol/
 COPY server/package.json server/
 COPY extension/package.json extension/
+COPY web/package.json web/
 RUN npm ci
 
 COPY tsconfig.base.json ./
@@ -15,7 +16,13 @@ COPY packages/protocol/tsconfig.json packages/protocol/
 COPY packages/protocol/src packages/protocol/src
 COPY server/tsconfig.json server/
 COPY server/src server/src
-RUN npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server
+COPY web/tsconfig.json web/
+COPY web/vite.config.ts web/
+COPY web/index.html web/
+COPY web/src web/src
+RUN npm run build -w @bili-syncplay/protocol \
+  && npm run build -w @bili-syncplay/server \
+  && npm run build -w @bili-syncplay/web
 
 # 重装仅生产依赖（ws、ioredis 及 workspace 链接），供运行阶段拷贝。
 RUN npm ci --omit=dev
@@ -32,6 +39,8 @@ COPY --from=builder /app/packages/protocol/package.json packages/protocol/
 COPY --from=builder /app/packages/protocol/dist packages/protocol/dist
 COPY --from=builder /app/server/package.json server/
 COPY --from=builder /app/server/dist server/dist
+COPY --from=builder /app/web/package.json web/
+COPY --from=builder /app/web/dist web/dist
 # 服务端按 dist/../admin-ui 解析管理面板静态资源。
 COPY server/admin-ui server/admin-ui
 

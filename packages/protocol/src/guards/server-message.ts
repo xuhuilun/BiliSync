@@ -8,11 +8,7 @@ import type {
   ServerMessage,
   SyncPongMessage,
 } from "../types/server-message.js";
-import type {
-  PlaybackState,
-  RoomMember,
-  RoomState,
-} from "../types/domain.js";
+import type { PlaybackState, RoomMember, RoomState } from "../types/domain.js";
 import { isPlaybackSyncIntent } from "../types/domain.js";
 import { isSharedVideo } from "./client-message.js";
 import {
@@ -24,7 +20,6 @@ import {
   isRoomCode,
   isString,
   isToken,
-  isVideoId,
 } from "./primitives.js";
 
 const DISPLAY_NAME_MAX_LENGTH = 32;

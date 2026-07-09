@@ -2,9 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { tryHandleAdminPanel } from "../admin-panel.js";
 import type { createSecurityPolicy } from "../security.js";
 import type { AdminUiConfig } from "../types.js";
+import { tryHandleWebPanel, type WebUiConfig } from "../web-panel.js";
 import {
+  createWebRouteState,
   tryHandleWebRoutes,
   type WebRoomService,
+  type WebRouteDependencies,
+  type WebRouteState,
 } from "../web-routes.js";
 
 export function createHttpRequestHandler(args: {
@@ -18,8 +22,12 @@ export function createHttpRequestHandler(args: {
   adminUiConfig?: AdminUiConfig;
   metricsEnabled?: boolean;
   webRoomService?: WebRoomService;
+  webRouteDependencies?: WebRouteDependencies;
+  webRouteState?: WebRouteState;
+  webUiConfig?: WebUiConfig;
   now?: () => number;
 }) {
+  const webRouteState = args.webRouteState ?? createWebRouteState();
   return async (
     request: IncomingMessage,
     response: ServerResponse,
@@ -90,6 +98,8 @@ export function createHttpRequestHandler(args: {
         response,
         pathname,
         roomService: args.webRoomService,
+        dependencies: args.webRouteDependencies,
+        state: webRouteState,
         now: args.now,
       });
       if (webRouteHandled) {
@@ -132,6 +142,15 @@ export function createHttpRequestHandler(args: {
         args.adminUiConfig,
       );
       if (adminPanelHandled) {
+        return;
+      }
+
+      const webPanelHandled = await tryHandleWebPanel(
+        request,
+        response,
+        args.webUiConfig,
+      );
+      if (webPanelHandled) {
         return;
       }
 

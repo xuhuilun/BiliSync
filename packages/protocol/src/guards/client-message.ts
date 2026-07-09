@@ -56,6 +56,15 @@ function isOptionalBoundedString(
   return value === undefined || isBoundedString(value, maxLength);
 }
 
+function isSameOriginWebMediaUrl(value: unknown): value is string {
+  return (
+    isString(value) &&
+    /^\/api\/web\/media\/[A-Za-z0-9_-]{16,128}\/video\.mp4(?:\?[A-Za-z0-9._~!$&'()*+,;=:@/?%-]*)?$/.test(
+      value,
+    )
+  );
+}
+
 export function isClientHelloPayload(
   value: unknown,
 ): value is ClientHelloPayload {
@@ -92,7 +101,9 @@ export function isSharedVideo(value: unknown): value is SharedVideo {
   );
 }
 
-function isPlaybackSourceKind(value: unknown): value is PlaybackSourceVariant["kind"] {
+function isPlaybackSourceKind(
+  value: unknown,
+): value is PlaybackSourceVariant["kind"] {
   return (
     isString(value) &&
     (PLAYBACK_SOURCE_KINDS as readonly string[]).includes(value)
@@ -106,7 +117,7 @@ export function isPlaybackSourceVariant(
     isRecord(value) &&
     isPlaybackSourceKind(value.kind) &&
     isBoundedString(value.url, URL_MAX_LENGTH) &&
-    isHttpUrl(value.url) &&
+    (isHttpUrl(value.url) || isSameOriginWebMediaUrl(value.url)) &&
     isBoundedString(value.mimeType, MIME_TYPE_MAX_LENGTH) &&
     isOptionalBoundedString(value.label, LABEL_MAX_LENGTH)
   );

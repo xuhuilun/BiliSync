@@ -7,17 +7,22 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createHttpRequestHandler } from "../src/bootstrap/http-handler.js";
 import { createSecurityPolicy } from "../src/security.js";
+import type { BilibiliFetch } from "../src/web-routes.js";
 
 function createRequest(args: {
   url: string;
   method?: string;
   origin?: string | null;
+  cookie?: string;
   body?: string;
 }) {
   return {
     url: args.url,
     method: args.method ?? "GET",
-    headers: args.origin ? { origin: args.origin } : {},
+    headers: {
+      ...(args.origin ? { origin: args.origin } : {}),
+      ...(args.cookie ? { cookie: args.cookie } : {}),
+    },
     socket: {
       remoteAddress: "127.0.0.1",
     },
@@ -39,8 +44,8 @@ function createResponse() {
       this.headers = headers;
       return this;
     },
-    end(body?: string) {
-      this.body = body ?? "";
+    end(body?: string | Buffer) {
+      this.body = Buffer.isBuffer(body) ? body.toString("utf8") : (body ?? "");
       return this;
     },
   } as unknown as ServerResponse & {
@@ -48,6 +53,97 @@ function createResponse() {
     headers: Record<string, string>;
     body: string;
   };
+}
+
+function jsonFetch(payload: unknown): Awaited<ReturnType<BilibiliFetch>> {
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name: string) =>
+        name.toLowerCase() === "content-type" ? "application/json" : null,
+    },
+    json: async () => payload,
+    arrayBuffer: async () => Buffer.from(JSON.stringify(payload)).buffer,
+  };
+}
+
+function bytesFetch(
+  body: string,
+  contentType = "video/mp4",
+): Awaited<ReturnType<BilibiliFetch>> {
+  const buffer = Buffer.from(body);
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name: string) =>
+        name.toLowerCase() === "content-type" ? contentType : null,
+    },
+    json: async () => JSON.parse(body),
+    arrayBuffer: async () =>
+      buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength,
+      ),
+  };
+}
+
+function qrGenerateFetch(
+  qrcodeKey = "qr-key-123",
+): Awaited<ReturnType<BilibiliFetch>> {
+  return jsonFetch({
+    code: 0,
+    data: {
+      url: `https://passport.bilibili.com/qrcode-login?key=${qrcodeKey}`,
+      qrcode_key: qrcodeKey,
+    },
+  });
+}
+
+function qrPollSuccessFetch(): Awaited<ReturnType<BilibiliFetch>> {
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name: string) =>
+        name.toLowerCase() === "set-cookie"
+          ? "SESSDATA=abc; Path=/; HttpOnly, bili_jct=csrf; Path=/"
+          : null,
+    },
+    json: async () => ({
+      code: 0,
+      data: {
+        code: 0,
+        message: "success",
+      },
+    }),
+    arrayBuffer: async () => Buffer.from("{}").buffer,
+  };
+}
+
+async function completeQrLogin(
+  handler: ReturnType<typeof createHttpRequestHandler>,
+  qrcodeKey = "qr-key-123",
+): Promise<void> {
+  const loginResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/auth/bilibili/login/start",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+    }),
+    loginResponse,
+  );
+  const statusResponse = createResponse();
+  await handler(
+    createRequest({
+      url: `/api/web/auth/bilibili/login/status?qrcodeKey=${qrcodeKey}`,
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    statusResponse,
+  );
 }
 
 function createHandler(adminHandled = false) {
@@ -338,6 +434,700 @@ test("web video resolve accepts direct HLS urls as shareable videos", async () =
   });
 });
 
+test("web bilibili auth reports missing login before a cookie is imported", async () => {
+  const { handler } = createHandler();
+  const response = createResponse();
+
+  await handler(
+    createRequest({
+      url: "/api/web/auth/bilibili/login/status",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: true,
+    data: {
+      loggedIn: false,
+    },
+  });
+});
+
+test("web bilibili QR login stores authorized cookie server-side", async () => {
+  const fetchCalls: Array<{ url: string; cookie?: string }> = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: () => "auth-session-token-123",
+      fetch: async (url, init) => {
+        fetchCalls.push({
+          url,
+          cookie: init?.headers?.cookie,
+        });
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              url: "https://passport.bilibili.com/qrcode-login?oauthKey=qr",
+              qrcode_key: "qr-key-123",
+            },
+          });
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "set-cookie"
+                  ? "SESSDATA=abc; Path=/; HttpOnly, bili_jct=csrf; Path=/"
+                  : null,
+            },
+            json: async () => ({
+              code: 0,
+              data: {
+                code: 0,
+                message: "success",
+              },
+            }),
+            arrayBuffer: async () => Buffer.from("{}").buffer,
+          };
+        }
+        return jsonFetch({
+          code: 0,
+          data: {
+            isLogin: true,
+            uname: "Alice",
+            face: "https://i0.hdslb.com/bfs/face/alice.jpg",
+          },
+        });
+      },
+    },
+  });
+  const startResponse = createResponse();
+
+  await handler(
+    createRequest({
+      url: "/api/web/auth/bilibili/login/start",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+    }),
+    startResponse,
+  );
+
+  assert.equal(startResponse.statusCode, 200);
+  assert.deepEqual(JSON.parse(startResponse.body), {
+    ok: true,
+    data: {
+      loginUrl: "https://passport.bilibili.com/qrcode-login?oauthKey=qr",
+      qrcodeKey: "qr-key-123",
+      expiresInSeconds: 180,
+    },
+  });
+
+  const statusResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/auth/bilibili/login/status?qrcodeKey=qr-key-123",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    statusResponse,
+  );
+
+  assert.equal(statusResponse.statusCode, 200);
+  assert.match(
+    statusResponse.headers["set-cookie"],
+    /^bili_sync_auth=auth-session-token-123;/,
+  );
+  assert.deepEqual(JSON.parse(statusResponse.body), {
+    ok: true,
+    data: {
+      loggedIn: true,
+      displayName: "Alice",
+      avatarUrl: "https://i0.hdslb.com/bfs/face/alice.jpg",
+      qrStatus: "succeeded",
+    },
+  });
+  assert.ok(
+    fetchCalls.some((call) =>
+      call.url.includes("/x/passport-login/web/qrcode/generate"),
+    ),
+  );
+  assert.ok(
+    fetchCalls.some((call) =>
+      call.url.includes("/x/passport-login/web/qrcode/poll"),
+    ),
+  );
+  assert.ok(
+    fetchCalls.some(
+      (call) =>
+        call.url.includes("/x/web-interface/nav") &&
+        call.cookie === "SESSDATA=abc; bili_jct=csrf",
+    ),
+  );
+});
+
+test("web bilibili resolve accepts BV input and returns proxied playback source", async () => {
+  const fetchCalls: string[] = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        fetchCalls.push(url);
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              isLogin: true,
+              uname: "Alice",
+            },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+              pic: "https://i0.hdslb.com/bfs/archive/poster.jpg",
+              duration: 100,
+            },
+          });
+        }
+        return jsonFetch({
+          code: 0,
+          data: {
+            durl: [
+              {
+                url: "https://upos.example.test/video.mp4",
+              },
+            ],
+          },
+        });
+      },
+    },
+  });
+  await completeQrLogin(handler);
+  const response = createResponse();
+
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({
+        input: "BV1xx411c7mD",
+      }),
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.video.sourceProvider, "authorized-bilibili");
+  assert.equal(payload.data.video.videoId, "BV1xx411c7mD:456");
+  assert.equal(payload.data.video.title, "Movie Night");
+  assert.match(
+    payload.data.playbackSource.variants[0].url,
+    /^\/api\/web\/media\/media-token-123456\/video\.mp4$/,
+  );
+  assert.ok(fetchCalls.some((url) => url.includes("bvid=BV1xx411c7mD")));
+});
+
+test("web bilibili resolve expands b23 short links before resolving playback source", async () => {
+  const fetchCalls: string[] = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-short"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        fetchCalls.push(url);
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url === "https://b23.tv/abc123") {
+          return {
+            ok: true,
+            status: 302,
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "location"
+                  ? "https://www.bilibili.com/video/BV1Xs421N7Gr/?share_source=copy_web"
+                  : null,
+            },
+            json: async () => ({}),
+            arrayBuffer: async () => Buffer.from("").buffer,
+          };
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1Xs421N7Gr",
+              aid: 46050491,
+              cid: 987,
+              title: "Short Link Movie",
+            },
+          });
+        }
+        return jsonFetch({
+          code: 0,
+          data: {
+            durl: [{ url: "https://upos.example.test/short.mp4" }],
+          },
+        });
+      },
+    },
+  });
+  await completeQrLogin(handler);
+  const response = createResponse();
+
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "https://b23.tv/abc123" }),
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.video.videoId, "BV1Xs421N7Gr:987");
+  assert.equal(
+    payload.data.video.url,
+    "https://www.bilibili.com/video/BV1Xs421N7Gr",
+  );
+  assert.ok(fetchCalls.includes("https://b23.tv/abc123"));
+  assert.ok(fetchCalls.some((url) => url.includes("bvid=BV1Xs421N7Gr")));
+});
+
+test("web bilibili resolve accepts bangumi episode links", async () => {
+  const fetchCalls: string[] = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-ep"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        fetchCalls.push(url);
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/pgc/view/web/season")) {
+          return jsonFetch({
+            code: 0,
+            result: {
+              season_title: "番剧标题",
+              episodes: [
+                {
+                  id: 600001,
+                  aid: 789,
+                  bvid: "BV1Pg411x7xX",
+                  cid: 222,
+                  title: "第1话",
+                  long_title: "开始",
+                  cover: "https://i0.hdslb.com/bfs/archive/ep.jpg",
+                  duration: 240000,
+                },
+              ],
+            },
+          });
+        }
+        return jsonFetch({
+          code: 0,
+          data: {
+            durl: [{ url: "https://upos.example.test/ep.mp4" }],
+          },
+        });
+      },
+    },
+  });
+  await completeQrLogin(handler);
+  const response = createResponse();
+
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({
+        input: "https://www.bilibili.com/bangumi/play/ep600001",
+      }),
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.video.videoId, "ep600001:222");
+  assert.equal(payload.data.video.title, "番剧标题 第1话 开始");
+  assert.equal(payload.data.video.sourceRef, "ep600001:222");
+  assert.match(
+    payload.data.playbackSource.variants[0].url,
+    /^\/api\/web\/media\/media-token-ep\/video\.mp4$/,
+  );
+  assert.ok(
+    fetchCalls.some(
+      (url) =>
+        url.includes("/pgc/player/web/playurl") &&
+        url.includes("ep_id=600001") &&
+        url.includes("cid=222"),
+    ),
+  );
+});
+
+test("web bilibili resolve returns explicit errors for empty and unsupported input", async () => {
+  const { handler } = createHandler();
+
+  const emptyResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      body: JSON.stringify({ input: "" }),
+    }),
+    emptyResponse,
+  );
+
+  assert.equal(emptyResponse.statusCode, 400);
+  assert.deepEqual(JSON.parse(emptyResponse.body), {
+    ok: false,
+    error: {
+      code: "empty_video_link",
+      message: "请先粘贴视频链接。",
+    },
+  });
+
+  const unsupportedResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      body: JSON.stringify({ input: "https://example.com/watch/1" }),
+    }),
+    unsupportedResponse,
+  );
+
+  assert.equal(unsupportedResponse.statusCode, 400);
+  assert.deepEqual(JSON.parse(unsupportedResponse.body), {
+    ok: false,
+    error: {
+      code: "unsupported_bilibili_link",
+      message: "暂不支持该链接格式，请检查后重试。",
+    },
+  });
+});
+
+test("web bilibili media proxy requires a current room member token", async () => {
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+            },
+          });
+        }
+        return jsonFetch({
+          code: 0,
+          data: { durl: [{ url: "https://upos.example.test/video.mp4" }] },
+        });
+      },
+    },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async () => false,
+    },
+  });
+  await completeQrLogin(handler);
+  const resolveResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    resolveResponse,
+  );
+
+  const response = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=bad-token",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 404);
+});
+
+test("web bilibili media proxy streams bytes for current room members", async () => {
+  const fetchedMediaUrls: string[] = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async () => false,
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url) => {
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+            },
+          });
+        }
+        if (url.includes("/x/player/playurl")) {
+          return jsonFetch({
+            code: 0,
+            data: { durl: [{ url: "https://upos.example.test/video.mp4" }] },
+          });
+        }
+        fetchedMediaUrls.push(url);
+        return bytesFetch("video-bytes");
+      },
+    },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async (roomCode, memberToken) =>
+        roomCode === "ABC123" && memberToken === "member-token",
+    },
+  });
+  await completeQrLogin(handler);
+  const resolveResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    resolveResponse,
+  );
+
+  const response = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "video/mp4");
+  assert.equal(response.body, "video-bytes");
+  assert.deepEqual(fetchedMediaUrls, ["https://upos.example.test/video.mp4"]);
+});
+
 test("web playback source requires a current room member token", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const room = await roomStore.createRoom({
@@ -419,7 +1209,9 @@ test("web playback source returns direct manifest for joined room members", asyn
     webRoomService: {
       getRoom: (roomCode) => roomStore.getRoom(roomCode),
       isMemberTokenInRoom: (roomCode, memberToken) =>
-        Promise.resolve(roomCode === "ABC123" && memberToken === "member-token"),
+        Promise.resolve(
+          roomCode === "ABC123" && memberToken === "member-token",
+        ),
     },
     now: () => 10_000,
   });

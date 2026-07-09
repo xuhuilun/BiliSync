@@ -75,6 +75,25 @@ test("playback source manifest guard accepts hls and mp4 variants", () => {
   );
 });
 
+test("playback source manifest guard accepts same-origin media proxy variants", () => {
+  assert.equal(
+    isPlaybackSourceManifest({
+      videoId: "BV1xx411c7mD:456",
+      title: "Movie Night",
+      expiresAt: Date.now() + 60_000,
+      variants: [
+        {
+          kind: "mp4",
+          url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token-1234567890",
+          mimeType: "video/mp4",
+          label: "B站代理",
+        },
+      ],
+    }),
+    true,
+  );
+});
+
 test("playback source manifest guard rejects unsupported protocols", () => {
   assert.equal(
     isPlaybackSourceManifest({
