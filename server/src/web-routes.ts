@@ -172,9 +172,7 @@ export function createFileWebAuthSessionStore(
         throw error;
       }
       const payload = readRecord(JSON.parse(raw));
-      const sessions = Array.isArray(payload?.sessions)
-        ? payload.sessions
-        : [];
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
       return sessions
         .map(readPersistedAuthSession)
         .filter((session): session is BilibiliAuthSession => session !== null);
@@ -192,9 +190,11 @@ export function createFileWebAuthSessionStore(
   };
 }
 
-export function createWebRouteState(args: {
-  authSessionStore?: WebAuthSessionStore;
-} = {}): WebRouteState {
+export function createWebRouteState(
+  args: {
+    authSessionStore?: WebAuthSessionStore;
+  } = {},
+): WebRouteState {
   return {
     authSessions: new Map(),
     authSessionsLoaded: !args.authSessionStore,
