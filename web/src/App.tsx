@@ -6,7 +6,6 @@ import {
   Film,
   Link2,
   LoaderCircle,
-  LogIn,
   LogOut,
   Pause,
   Play,
@@ -118,32 +117,15 @@ function parseInviteFromLocation(): { roomCode: string; joinToken: string } {
   };
 }
 
-function formatRoomCredential(args: {
+function buildInviteUrl(args: {
   roomCode: string;
   joinToken: string | null;
 }): string {
-  if (!args.roomCode) {
+  if (!args.roomCode || !args.joinToken) {
     return "";
   }
-  return args.joinToken ? `${args.roomCode}:${args.joinToken}` : args.roomCode;
-}
-
-function parseRoomCredential(input: string): {
-  roomCode: string;
-  joinToken: string;
-} {
-  const trimmed = input.trim();
-  const separatorIndex = trimmed.indexOf(":");
-  if (separatorIndex === -1) {
-    return {
-      roomCode: trimmed.toUpperCase(),
-      joinToken: "",
-    };
-  }
-  return {
-    roomCode: trimmed.slice(0, separatorIndex).trim().toUpperCase(),
-    joinToken: trimmed.slice(separatorIndex + 1).trim(),
-  };
+  const base = `${window.location.origin}/join`;
+  return `${base}?room=${encodeURIComponent(args.roomCode)}&join=${encodeURIComponent(args.joinToken)}`;
 }
 
 function expectedCurrentTime(playback: PlaybackState): number {
@@ -245,12 +227,6 @@ function qrMessage(status: QrLoginStatus): string {
 export default function App() {
   const initialInvite = useMemo(parseInviteFromLocation, []);
   const [displayName, setDisplayName] = useState("Web 观众");
-  const [roomCredentialInput, setRoomCredentialInput] = useState(() =>
-    formatRoomCredential({
-      roomCode: initialInvite.roomCode,
-      joinToken: initialInvite.joinToken,
-    }),
-  );
   const [videoInput, setVideoInput] = useState("");
   const [isResolvingVideo, setIsResolvingVideo] = useState(false);
   const [authProfile, setAuthProfile] = useState<AuthProfile>({
@@ -270,7 +246,6 @@ export default function App() {
   const [manifest, setManifest] = useState<PlaybackSourceManifest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [roomParseMessage, setRoomParseMessage] = useState<string | null>(null);
   const [nowPlayingTime, setNowPlayingTime] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -281,7 +256,6 @@ export default function App() {
   const suppressLocalPlaybackEventsUntilRef = useRef(0);
   const autoplayAfterResolveRef = useRef(false);
   const pendingJoinTokenRef = useRef("");
-  const roomParseTimerRef = useRef<number | null>(null);
   const avatarCloseTimerRef = useRef<number | null>(null);
   const sequenceRef = useRef(1);
 
@@ -317,26 +291,6 @@ export default function App() {
     }
     return `${session.roomCode}:${session.memberToken}`;
   }, [session?.memberToken, session?.roomCode]);
-
-  const showRoomParseMessage = useCallback((message: string) => {
-    if (roomParseTimerRef.current !== null) {
-      window.clearTimeout(roomParseTimerRef.current);
-    }
-    setRoomParseMessage(message);
-    roomParseTimerRef.current = window.setTimeout(() => {
-      setRoomParseMessage(null);
-      roomParseTimerRef.current = null;
-    }, 2000);
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (roomParseTimerRef.current !== null) {
-        window.clearTimeout(roomParseTimerRef.current);
-      }
-    },
-    [],
-  );
 
   useEffect(() => {
     void fetch("/api/web/auth/bilibili/login/status", {
@@ -515,17 +469,12 @@ export default function App() {
   const handleServerMessage = useCallback((message: ServerMessage) => {
     switch (message.type) {
       case "room:created": {
-        const credential = formatRoomCredential({
-          roomCode: message.payload.roomCode,
-          joinToken: message.payload.joinToken,
-        });
         setSession({
           roomCode: message.payload.roomCode,
           memberId: message.payload.memberId,
           memberToken: message.payload.memberToken,
           joinToken: message.payload.joinToken,
         });
-        setRoomCredentialInput(credential);
         setNotice("情侣房间已创建");
         return;
       }
@@ -538,12 +487,6 @@ export default function App() {
           memberToken: message.payload.memberToken,
           joinToken,
         });
-        setRoomCredentialInput(
-          formatRoomCredential({
-            roomCode: message.payload.roomCode,
-            joinToken,
-          }),
-        );
         setNotice("已加入情侣房间");
         return;
       }
@@ -640,51 +583,47 @@ export default function App() {
     });
   }, [connect, displayName]);
 
-  const joinRoom = useCallback(() => {
-    const { roomCode, joinToken } = parseRoomCredential(roomCredentialInput);
-    setRoomCredentialInput(formatRoomCredential({ roomCode, joinToken }));
-    showRoomParseMessage(
-      joinToken
-        ? `已解析：房间号 ${roomCode}，邀请码已识别`
-        : `已解析：房间号 ${roomCode || "-"}，邀请码为空`,
-    );
-    if (!roomCode) {
-      setError("请粘贴房间号或 房间号:邀请码");
-      return;
-    }
-    if (!joinToken) {
-      setError("请粘贴完整的 房间号:邀请码");
-      return;
-    }
+  const autoJoinRoom = useCallback(
+    (roomCode: string, joinToken: string) => {
+      if (!roomCode || !joinToken) {
+        return;
+      }
+      pendingJoinTokenRef.current = joinToken;
+      connect((socket) => {
+        socket.send(
+          JSON.stringify({
+            type: "room:join",
+            payload: {
+              roomCode,
+              joinToken,
+              displayName,
+              protocolVersion: PROTOCOL_VERSION,
+            },
+          } satisfies ClientMessage),
+        );
+      });
+    },
+    [connect, displayName],
+  );
 
-    pendingJoinTokenRef.current = joinToken;
-    connect((socket) => {
-      socket.send(
-        JSON.stringify({
-          type: "room:join",
-          payload: {
-            roomCode,
-            joinToken,
-            displayName,
-            protocolVersion: PROTOCOL_VERSION,
-          },
-        } satisfies ClientMessage),
-      );
-    });
-  }, [connect, displayName, roomCredentialInput, showRoomParseMessage]);
+  useEffect(() => {
+    if (initialInvite.roomCode && initialInvite.joinToken) {
+      autoJoinRoom(initialInvite.roomCode, initialInvite.joinToken);
+    }
+  }, [autoJoinRoom, initialInvite.joinToken, initialInvite.roomCode]);
 
   const copyInvite = useCallback(async () => {
-    const credential = session
-      ? formatRoomCredential({
+    const inviteUrl = session
+      ? buildInviteUrl({
           roomCode: session.roomCode,
           joinToken: session.joinToken,
         })
       : "";
-    if (!credential || !session?.joinToken) {
+    if (!inviteUrl) {
       return;
     }
-    await navigator.clipboard.writeText(credential);
-    setNotice("房间号和邀请码已复制");
+    await navigator.clipboard.writeText(inviteUrl);
+    setNotice("邀请链接已复制");
   }, [session]);
 
   const loadPlaybackSource = useCallback(async (nextSession: RoomSession) => {
@@ -916,12 +855,7 @@ export default function App() {
       const shouldPlay = playback.playState === "playing" && video.paused;
       const shouldPause = playback.playState !== "playing" && !video.paused;
 
-      if (
-        !shouldSeek &&
-        !shouldUpdateRate &&
-        !shouldPlay &&
-        !shouldPause
-      ) {
+      if (!shouldSeek && !shouldUpdateRate && !shouldPlay && !shouldPause) {
         return;
       }
 
@@ -1080,30 +1014,7 @@ export default function App() {
               <Radio size={18} />
               创建房间
             </button>
-            <button type="button" onClick={joinRoom}>
-              <LogIn size={18} />
-              加入房间
-            </button>
           </div>
-          <label>
-            房间凭证
-            <input
-              value={roomCredentialInput}
-              placeholder="请粘贴 ‘房间号:邀请码’ 格式"
-              onChange={(event) => setRoomCredentialInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  joinRoom();
-                }
-              }}
-            />
-          </label>
-          {roomParseMessage ? (
-            <p className="parse-result-toast" role="status">
-              {roomParseMessage}
-            </p>
-          ) : null}
           {session ? (
             <div className="room-card">
               <div>
@@ -1114,7 +1025,7 @@ export default function App() {
                 <button
                   type="button"
                   className="icon-button"
-                  title="复制房间号:邀请码"
+                  title="复制邀请链接"
                   onClick={copyInvite}
                 >
                   <Copy size={18} />
