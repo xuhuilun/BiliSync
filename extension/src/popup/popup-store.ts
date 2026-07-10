@@ -7,7 +7,6 @@ export interface PopupUiState {
   lastKnownPendingJoinRoomCode: string | null;
   lastKnownRoomCode: string | null;
   lastRoomEnteredAt: number;
-  roomCodeDraft: string;
   localStatusMessage: string | null;
   copyRoomSuccess: boolean;
   copyLogsSuccess: boolean;
@@ -24,7 +23,6 @@ export function createPopupUiState(): PopupUiState {
     lastKnownPendingJoinRoomCode: null,
     lastKnownRoomCode: null,
     lastRoomEnteredAt: 0,
-    roomCodeDraft: "",
     localStatusMessage: null,
     copyRoomSuccess: false,
     copyLogsSuccess: false,

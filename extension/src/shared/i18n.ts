@@ -15,8 +15,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     actionCopy: "复制",
     actionLeave: "退出",
     actionCreate: "创建",
-    roomCodePlaceholder: "输入房间码",
-    actionJoin: "加入",
     sectionSharedVideo: "当前共享视频",
     stateNoSharedVideo: "暂无共享视频",
     actionOpenSharedVideoHint: "点击可打开共享视频",
@@ -61,7 +59,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "当前未加入房间。是否创建房间并同步当前页视频？",
     confirmReplaceSharedVideo:
       "当前房间正在同步《{currentTitle}》。\n是否替换为《{nextTitle}》？",
-    errorInvalidInviteFormat: "邀请格式无效，请输入“房间码:加入码”。",
     invalidServerUrl: "服务端地址必须以 ws:// 或 wss:// 开头。",
     serverUrlAdjusted: "服务端地址已调整为 {resolved}，请核对。",
     connectionServerUnreachable: "无法连接到同步服务器。",
@@ -110,8 +107,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     actionCopy: "Copy",
     actionLeave: "Leave",
     actionCreate: "Create",
-    roomCodePlaceholder: "Enter invite code",
-    actionJoin: "Join",
     sectionSharedVideo: "Current shared video",
     stateNoSharedVideo: "No shared video yet",
     actionOpenSharedVideoHint: "Click to open the shared video",
@@ -157,8 +152,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "You're not in a room yet. Create one and sync the current page video?",
     confirmReplaceSharedVideo:
       'The room is currently syncing "{currentTitle}".\nReplace it with "{nextTitle}"?',
-    errorInvalidInviteFormat:
-      'Invalid invite format. Enter "ROOMCODE:JOINTOKEN".',
     invalidServerUrl: "Server URL must start with ws:// or wss://.",
     serverUrlAdjusted: "Server URL was adjusted to {resolved}; please verify.",
     connectionServerUnreachable: "Unable to connect to the sync server.",

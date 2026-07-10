@@ -8,7 +8,6 @@ test("popup ui state store exposes stable mutable state and patch semantics", ()
 
   store.patch({
     roomActionPending: true,
-    roomCodeDraft: "ROOM01:token-1234567890abcdef",
     localStatusMessage: "busy",
     copyRoomSuccess: true,
   });
@@ -16,7 +15,6 @@ test("popup ui state store exposes stable mutable state and patch semantics", ()
   const nextState = store.getState();
   assert.equal(nextState, initialState);
   assert.equal(nextState.roomActionPending, true);
-  assert.equal(nextState.roomCodeDraft, "ROOM01:token-1234567890abcdef");
   assert.equal(nextState.localStatusMessage, "busy");
   assert.equal(nextState.copyRoomSuccess, true);
   assert.equal(nextState.copyLogsSuccess, false);
@@ -34,5 +32,4 @@ test("popup ui state store reset restores runtime defaults", () => {
   assert.equal(resetState.roomActionPending, false);
   assert.equal(resetState.lastKnownRoomCode, null);
   assert.equal(resetState.copyLogsSuccess, false);
-  assert.equal(resetState.roomCodeDraft, "");
 });

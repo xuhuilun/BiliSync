@@ -135,10 +135,6 @@ function render(): void {
     refs,
     state: popupStateSync.popupState,
     serverUrlDraft,
-    roomCodeDraft: uiState.roomCodeDraft,
-    setRoomCodeDraft: (value) => {
-      popupUiStateStore.patch({ roomCodeDraft: value });
-    },
     localStatusMessage: uiState.localStatusMessage,
     roomActionPending: uiState.roomActionPending,
     lastKnownPendingCreateRoom: uiState.lastKnownPendingCreateRoom,

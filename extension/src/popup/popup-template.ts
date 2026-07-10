@@ -40,11 +40,7 @@ export function renderPopupTemplate(): string {
         </div>
 
         <div class="room-panel room-panel-idle" id="room-panel-idle">
-          <div class="room-entry-row">
-            <button class="compact-button primary-button" id="create-room" type="button">${escapeHtml(t("actionCreate"))}</button>
-            <input id="room-code" placeholder="${escapeHtml(t("roomCodePlaceholder"))}">
-            <button class="secondary compact-button" id="join-room" type="button">${escapeHtml(t("actionJoin"))}</button>
-          </div>
+          <button class="compact-button primary-button full-width-button" id="create-room" type="button">${escapeHtml(t("actionCreate"))}</button>
         </div>
 
         <div class="status-banner" id="status-message" hidden></div>

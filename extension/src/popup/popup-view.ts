@@ -5,7 +5,6 @@ export interface PopupRefs {
   message: HTMLElement;
   roomPanelJoined: HTMLElement;
   roomPanelIdle: HTMLElement;
-  roomCodeInput: HTMLInputElement;
   copyRoomButton: HTMLButtonElement;
   shareCurrentVideoButton: HTMLButtonElement;
   sharedVideoCard: HTMLButtonElement;
@@ -23,7 +22,6 @@ export interface PopupRefs {
   retryStatusCount: HTMLElement;
   clockStatus: HTMLElement;
   createRoomButton: HTMLButtonElement;
-  joinRoomButton: HTMLButtonElement;
   leaveRoomButton: HTMLButtonElement;
 }
 
@@ -35,7 +33,6 @@ export function collectPopupRefs(): PopupRefs {
     message: getById("status-message"),
     roomPanelJoined: getById("room-panel-joined"),
     roomPanelIdle: getById("room-panel-idle"),
-    roomCodeInput: getById("room-code") as HTMLInputElement,
     copyRoomButton: getById("copy-room") as HTMLButtonElement,
     shareCurrentVideoButton: getById(
       "share-current-video",
@@ -57,7 +54,6 @@ export function collectPopupRefs(): PopupRefs {
     retryStatusCount: getById("retry-status-count"),
     clockStatus: getById("clock-status"),
     createRoomButton: getById("create-room") as HTMLButtonElement,
-    joinRoomButton: getById("join-room") as HTMLButtonElement,
     leaveRoomButton: getById("leave-room") as HTMLButtonElement,
   };
 }

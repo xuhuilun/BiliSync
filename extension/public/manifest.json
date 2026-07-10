@@ -5,7 +5,11 @@
   "description": "__MSG_extensionDescription__",
   "default_locale": "zh_CN",
   "permissions": ["storage", "tabs"],
-  "host_permissions": ["https://www.bilibili.com/*"],
+  "host_permissions": [
+    "https://www.bilibili.com/*",
+    "https://*/join*",
+    "http://localhost:*/join*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -40,6 +44,11 @@
         "https://www.bilibili.com/medialist/play/watchlater*"
       ],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*/join*", "http://localhost:*/join*"],
+      "js": ["join-room.js"],
       "run_at": "document_idle"
     }
   ]

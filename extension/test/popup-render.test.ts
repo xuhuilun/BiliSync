@@ -76,7 +76,6 @@ function createPopupRefs(): PopupRefs {
     message: createElement() as unknown as HTMLElement,
     roomPanelJoined: createElement() as unknown as HTMLElement,
     roomPanelIdle: createElement() as unknown as HTMLElement,
-    roomCodeInput: createElement() as unknown as HTMLInputElement,
     copyRoomButton: createElement() as unknown as HTMLButtonElement,
     shareCurrentVideoButton: createElement() as unknown as HTMLButtonElement,
     sharedVideoCard: createElement() as unknown as HTMLButtonElement,
@@ -94,7 +93,6 @@ function createPopupRefs(): PopupRefs {
     retryStatusCount: createElement() as unknown as HTMLElement,
     clockStatus: createElement() as unknown as HTMLElement,
     createRoomButton: createElement() as unknown as HTMLButtonElement,
-    joinRoomButton: createElement() as unknown as HTMLButtonElement,
     leaveRoomButton: createElement() as unknown as HTMLButtonElement,
   };
 }
@@ -102,7 +100,6 @@ function createPopupRefs(): PopupRefs {
 test("applyRoomActionControlState disables room actions during room transitions", () => {
   resetPopupRenderDebugStateForTests();
   const refs = createPopupRefs();
-  refs.roomCodeInput.value = "ROOM01:token-1";
 
   applyRoomActionControlState({
     refs,
@@ -113,9 +110,7 @@ test("applyRoomActionControlState disables room actions during room transitions"
   });
 
   assert.equal(refs.createRoomButton.disabled, true);
-  assert.equal(refs.joinRoomButton.disabled, true);
   assert.equal(refs.leaveRoomButton.disabled, true);
-  assert.equal(refs.roomCodeInput.disabled, true);
 });
 
 test("renderPopup updates popup metrics, owner hint, logs, and draft values", async () => {
@@ -123,13 +118,9 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
   setLocaleForTests("en-US");
   const originalDocument = globalThis.document;
   const refs = createPopupRefs();
-  const roomCodeInput = refs.roomCodeInput as unknown as {
-    value: string;
-  };
   const serverUrlInput = refs.serverUrlInput as unknown as {
     value: string;
   };
-  const draftValues: string[] = [];
 
   Object.assign(globalThis, {
     document: fakeDocument,
@@ -177,10 +168,6 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
         ],
       },
       serverUrlDraft: { value: "", dirty: false },
-      roomCodeDraft: "",
-      setRoomCodeDraft: (value) => {
-        draftValues.push(value);
-      },
       localStatusMessage: "Ready",
       roomActionPending: false,
       lastKnownPendingCreateRoom: false,
@@ -196,10 +183,8 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     assert.equal(refs.roomStatus.textContent, "ROOM01");
     assert.equal(refs.membersStatus.textContent, "2 members");
     assert.equal(refs.message.textContent, "Ready");
-    assert.equal(roomCodeInput.value, "ROOM01:join-token-1");
     assert.equal(serverUrlInput.value, "ws://localhost:8787");
     assert.equal(refs.pageShareButtonEnabledInput.checked, false);
-    assert.deepEqual(draftValues, ["ROOM01:join-token-1"]);
     assert.equal(refs.copyRoomButton.disabled, false);
     assert.equal(
       refs.copyRoomButton.classList.contains("success-button"),
@@ -256,8 +241,6 @@ test("renderPopup debug log distinguishes background pending state from local UI
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
-      roomCodeDraft: "ROOM01:join-token-1",
-      setRoomCodeDraft: () => {},
       localStatusMessage: null,
       roomActionPending: true,
       lastKnownPendingCreateRoom: false,
@@ -312,8 +295,6 @@ test("renderPopup only logs once for repeated identical pending renders", async 
       logs: [],
     },
     serverUrlDraft: { value: "", dirty: false },
-    roomCodeDraft: "",
-    setRoomCodeDraft: () => {},
     localStatusMessage: null,
     roomActionPending: true,
     lastKnownPendingCreateRoom: false,
@@ -383,8 +364,6 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
-      roomCodeDraft: "",
-      setRoomCodeDraft: () => {},
       localStatusMessage: null,
       roomActionPending: false,
       lastKnownPendingCreateRoom: false,

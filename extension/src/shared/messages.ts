@@ -44,6 +44,12 @@ export type ContentToBackgroundMessage =
   | { type: "content:set-page-share-button-enabled"; enabled: boolean }
   | { type: "content:debug-log"; payload: { message: string } };
 
+export type JoinToBackgroundMessage = {
+  type: "join:auto-join";
+  roomCode: string;
+  joinToken: string;
+};
+
 export interface DebugLogEntry {
   at: number;
   scope: "background" | "content" | "server" | "popup";

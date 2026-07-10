@@ -1,8 +1,6 @@
 import type { BackgroundPopupState } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
 import { areSharedVideoUrlsEqual } from "../shared/url";
-import { parseInviteValue } from "./helpers";
-import { formatInviteDraft } from "./popup-render";
 import { sendPopupAction, sendPopupActiveVideoQuery } from "./popup-port";
 import type { PopupUiStateStore } from "./popup-store";
 import {
@@ -25,13 +23,6 @@ export function bindPopupActions(args: {
   getPopupState: () => BackgroundPopupState | null;
 }): void {
   const { refs } = args;
-
-  refs.joinRoomButton.addEventListener("pointerdown", () => {
-    const uiState = args.uiStateStore.getState();
-    void args.sendPopupLog(
-      `Join button pointerdown disabled=${refs.joinRoomButton.disabled} pending=${uiState.roomActionPending} inputDisabled=${refs.roomCodeInput.disabled}`,
-    );
-  });
 
   refs.leaveRoomButton.addEventListener("pointerdown", () => {
     const uiState = args.uiStateStore.getState();
@@ -65,16 +56,6 @@ export function bindPopupActions(args: {
     }
   });
 
-  refs.joinRoomButton.addEventListener("click", async () => {
-    await joinRoom({
-      inviteText: refs.roomCodeInput.value.trim(),
-      reasonLabel: "Join button clicked",
-      resolvedLabel: "Join message resolved",
-      invalidLabel: "Join click ignored because invite string is invalid",
-      pendingLabel: "Join click ignored because room action is pending",
-    });
-  });
-
   refs.leaveRoomButton.addEventListener("click", async () => {
     const uiState = args.uiStateStore.getState();
     if (uiState.roomActionPending) {
@@ -92,10 +73,6 @@ export function bindPopupActions(args: {
     void args.sendPopupLog("Leave room button clicked");
     patchUiState({
       localStatusMessage: null,
-      roomCodeDraft: formatInviteDraft(
-        uiState.lastKnownRoomCode,
-        args.getPopupState()?.joinToken ?? null,
-      ),
       roomActionPending: true,
     });
     try {
@@ -117,7 +94,11 @@ export function bindPopupActions(args: {
       return;
     }
 
-    await navigator.clipboard.writeText(`${roomCode}:${state.joinToken}`);
+    const httpUrl = state.serverUrl
+      .replace(/^wss:/, "https:")
+      .replace(/^ws:/, "http:");
+    const joinUrl = `${httpUrl}/join?room=${encodeURIComponent(roomCode)}&token=${encodeURIComponent(state.joinToken)}`;
+    await navigator.clipboard.writeText(joinUrl);
     toggleCopySuccess("copyRoomSuccess");
   });
 
@@ -153,37 +134,6 @@ export function bindPopupActions(args: {
       enabled: refs.pageShareButtonEnabledInput.checked,
     });
     args.applyActionState(state);
-  });
-
-  refs.roomCodeInput.addEventListener("keydown", async (event) => {
-    if (event.key !== "Enter") {
-      return;
-    }
-    await joinRoom({
-      inviteText: refs.roomCodeInput.value.trim(),
-      reasonLabel: "Join by Enter",
-      resolvedLabel: "Join by Enter resolved",
-      invalidLabel: "Join by Enter ignored because invite string is invalid",
-      pendingLabel: "Join by Enter ignored because room action is pending",
-      event,
-    });
-  });
-
-  refs.roomCodeInput.addEventListener("input", () => {
-    args.applyRoomActionControlState(refs);
-    const inviteText = refs.roomCodeInput.value.trim();
-    const invite = parseInviteValue(inviteText);
-    patchUiState({
-      roomCodeDraft: invite
-        ? `${invite.roomCode}:${invite.joinToken}`
-        : inviteText,
-    });
-    if (args.uiStateStore.getState().localStatusMessage) {
-      patchUiState({ localStatusMessage: null });
-    }
-    if (invite) {
-      void args.sendPopupLog(`Invite input changed room=${invite.roomCode}`);
-    }
   });
 
   const saveServerUrl = async () => {
@@ -280,56 +230,6 @@ export function bindPopupActions(args: {
     await chrome.runtime.sendMessage({ type: "popup:share-current-video" });
     if (args.getPopupState()) {
       args.render();
-    }
-  }
-
-  async function joinRoom(args2: {
-    inviteText: string;
-    reasonLabel: string;
-    resolvedLabel: string;
-    invalidLabel: string;
-    pendingLabel: string;
-    event?: KeyboardEvent;
-  }): Promise<void> {
-    if (args2.event) {
-      if (args2.event.key !== "Enter") {
-        return;
-      }
-      if (args.uiStateStore.getState().roomActionPending) {
-        void args.sendPopupLog(args2.pendingLabel);
-        return;
-      }
-    } else if (args.uiStateStore.getState().roomActionPending) {
-      void args.sendPopupLog(args2.pendingLabel);
-      return;
-    }
-
-    const invite = parseInviteValue(args2.inviteText);
-    if (!invite) {
-      patchUiState({ localStatusMessage: t("errorInvalidInviteFormat") });
-      void args.sendPopupLog(args2.invalidLabel);
-      return;
-    }
-    patchUiState({
-      localRoomEntryPending: true,
-      localStatusMessage: null,
-      roomCodeDraft: `${invite.roomCode}:${invite.joinToken}`,
-    });
-    void args.sendPopupLog(`${args2.reasonLabel} room=${invite.roomCode}`);
-    patchUiState({ roomActionPending: true });
-    try {
-      const state = await sendPopupAction({
-        type: "popup:join-room",
-        roomCode: invite.roomCode,
-        joinToken: invite.joinToken,
-      });
-      args.applyActionState(state);
-      void args.sendPopupLog(`${args2.resolvedLabel} room=${invite.roomCode}`);
-      patchUiState({ roomActionPending: false });
-    } finally {
-      if (args.uiStateStore.getState().roomActionPending) {
-        patchUiState({ roomActionPending: false });
-      }
     }
   }
 

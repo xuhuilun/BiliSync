@@ -13,16 +13,6 @@ export function resetPopupRenderDebugStateForTests(): void {
   lastPendingRenderLogKey = null;
 }
 
-export function formatInviteDraft(
-  roomCode: string | null,
-  joinToken: string | null,
-): string {
-  if (!roomCode) {
-    return "";
-  }
-  return joinToken ? `${roomCode}:${joinToken}` : roomCode;
-}
-
 export function applyRoomActionControlState(args: {
   refs: PopupRefs;
   roomActionPending: boolean;
@@ -35,19 +25,13 @@ export function applyRoomActionControlState(args: {
     args.lastKnownPendingCreateRoom ||
     Boolean(args.lastKnownPendingJoinRoomCode);
   args.refs.createRoomButton.disabled = isRoomTransitioning;
-  args.refs.joinRoomButton.disabled =
-    isRoomTransitioning || !args.refs.roomCodeInput.value.trim();
   args.refs.leaveRoomButton.disabled = isRoomTransitioning;
-  args.refs.roomCodeInput.disabled =
-    isRoomTransitioning || Boolean(args.lastKnownRoomCode);
 }
 
 export function renderPopup(args: {
   refs: PopupRefs;
   state: BackgroundPopupState;
   serverUrlDraft: ServerUrlDraftState;
-  roomCodeDraft: string;
-  setRoomCodeDraft: (value: string) => void;
   localStatusMessage: string | null;
   roomActionPending: boolean;
   lastKnownPendingCreateRoom: boolean;
@@ -57,7 +41,6 @@ export function renderPopup(args: {
   copyLogsSuccess: boolean;
   sendPopupLog: (message: string) => Promise<void>;
 }): void {
-  const roomCodeFocused = document.activeElement === args.refs.roomCodeInput;
   const serverUrlFocused = document.activeElement === args.refs.serverUrlInput;
 
   args.refs.serverStatus.textContent = args.state.connected
@@ -93,18 +76,6 @@ export function renderPopup(args: {
   args.refs.pageShareButtonEnabledInput.checked =
     args.state.pageShareButtonEnabled;
 
-  if (!roomCodeFocused) {
-    if (args.state.roomCode) {
-      const nextRoomCodeDraft = formatInviteDraft(
-        args.state.roomCode,
-        args.state.joinToken,
-      );
-      args.setRoomCodeDraft(nextRoomCodeDraft);
-      args.refs.roomCodeInput.value = nextRoomCodeDraft;
-    } else {
-      args.refs.roomCodeInput.value = args.roomCodeDraft;
-    }
-  }
   args.refs.serverUrlInput.value = getRenderedServerUrlValue(
     args.serverUrlDraft,
     args.state.serverUrl,

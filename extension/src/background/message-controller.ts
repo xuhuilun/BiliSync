@@ -1,5 +1,6 @@
 import type {
   ContentToBackgroundMessage,
+  JoinToBackgroundMessage,
   PageShareButtonSettingsResponse,
   PopupToBackgroundMessage,
   ShareContextResponse,
@@ -14,7 +15,10 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 
-type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
+type RuntimeMessage =
+  | PopupToBackgroundMessage
+  | ContentToBackgroundMessage
+  | JoinToBackgroundMessage;
 type QueueSharedVideoResult = { ok: true } | { ok: false; error: string };
 
 export interface MessageController {
@@ -650,6 +654,18 @@ export function createMessageController(args: {
           `[${args.diagnosticsController.formatContentSource(sender)}] ${message.payload.message}`,
         );
         sendResponse({ ok: true });
+        return;
+      case "join:auto-join":
+        await args.roomSessionController.requestJoinRoom(
+          message.roomCode,
+          message.joinToken,
+        );
+        if (!args.connectionState.connected) {
+          sendResponse(args.popupStateController.popupState());
+          return;
+        }
+        await args.roomSessionController.waitForJoinAttemptResult();
+        sendResponse(args.popupStateController.popupState());
         return;
       default:
         sendResponse({ ok: false });
