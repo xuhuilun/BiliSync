@@ -33,6 +33,32 @@ Bili-SyncPlay 是一个“浏览器扩展（Chrome / Edge / Firefox）+ WebSocke
 
 ### 1. 安装并构建
 
+
+项目根目录有一个 `npm run dev`（通过 `scripts/dev-web.mjs` 同时启动前后端）。
+
+两种方式：
+
+**本地测试（推荐）：同时启动前后端**
+```bash
+npm run dev
+```
+
+**方式二：分开启动**
+```bash
+# 终端1：启动后端
+npm run dev:server
+
+# 终端2：启动前端
+npm run dev:web
+```
+
+如果遇到 `@bili-syncplay/protocol` 找不到的报错，先清理重装：
+```bash
+Remove-Item -Recurse -Force node_modules
+npm install
+npm run build -w @bili-syncplay/protocol
+```
+**部署（推荐）：同时启动前后端**
 ```bash
 npm install
 npm run build
