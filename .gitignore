@@ -14,3 +14,25 @@ release/
 .codex/
 .tmp/
 .bili-syncplay/
+
+# 环境变量 / 密钥（server 与脚本大量依赖 process.env，切勿提交本地配置）
+.env
+.env.*
+!.env.example
+
+# 构建 / 校验缓存
+*.tsbuildinfo
+.eslintcache
+.vite/
+
+# 运行时数据（本地 Redis 落盘等）
+dump.rdb
+
+# 编辑器
+.idea/
+*.swp
+
+# 操作系统垃圾文件
+.DS_Store
+Thumbs.db
+Desktop.ini
