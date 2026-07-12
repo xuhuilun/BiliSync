@@ -489,11 +489,7 @@ export default function App() {
             message: qrMessage("succeeded"),
           }));
           setNotice("B站账号已登录");
-          window.setTimeout(() => {
-            if (!stopped) {
-              setQrDialogOpen(false);
-            }
-          }, 700);
+          setQrDialogOpen(false);
           return;
         }
         const nextStatus = payload.data.qrStatus ?? "pending";

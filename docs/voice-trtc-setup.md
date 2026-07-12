@@ -11,10 +11,10 @@
 PowerShell 示例：
 
 ```powershell
-$env:TRTC_SDK_APP_ID="1400000001"
-$env:TRTC_SECRET_KEY="替换为腾讯云控制台中的密钥"
-$env:TRTC_USER_SIG_TTL_SECONDS="900"
-npm run dev:server
+$env:TRTC_SDK_APP_ID="1600151475"
+$env:TRTC_SECRET_KEY="752f8c84a3d7ac78e9be8f28e9be392a9aaa231d3bf3d74cb96b1d10c095d2b0"
+$env:TRTC_USER_SIG_TTL_SECONDS="9000"
+npm run build
 ```
 
 生产环境必须使用 HTTPS（`localhost` 开发环境除外），否则浏览器通常拒绝麦克风采集。服务端只向当前房间内持有有效 `memberToken` 的成员签发短期凭证，SecretKey 永不下发到浏览器。
