@@ -633,10 +633,7 @@ test("web bilibili auth session survives a fresh server handler through the pers
     if (url.includes("/x/passport-login/web/qrcode/poll")) {
       return qrPollSuccessFetch();
     }
-    assert.equal(
-      init?.headers?.cookie,
-      "SESSDATA=abc; bili_jct=csrf",
-    );
+    assert.equal(init?.headers?.cookie, "SESSDATA=abc; bili_jct=csrf");
     return jsonFetch({
       code: 0,
       data: {

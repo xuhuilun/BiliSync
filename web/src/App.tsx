@@ -7,15 +7,24 @@ import {
   Link2,
   LoaderCircle,
   LogOut,
+  Mic,
+  MicOff,
   Pause,
   Play,
   QrCode,
   Radio,
   RefreshCw,
-  UserRound,
   Users,
   X,
 } from "lucide-react";
+import { createTrtcVoiceAdapter } from "./voice/trtc-adapter.js";
+import { createTrtcUserId } from "./voice/member-identity.js";
+import { VoiceDuckingController } from "./voice/voice-ducking.js";
+import {
+  VoiceSessionController,
+  type VoiceCredential,
+  type VoiceSessionState,
+} from "./voice/voice-session.js";
 import {
   isPlaybackSourceManifest,
   isServerMessage,
@@ -81,6 +90,12 @@ type AuthStatusResponse = {
   error?: {
     message?: string;
   };
+};
+
+type VoiceTokenResponse = {
+  ok: boolean;
+  data?: VoiceCredential;
+  error?: { message?: string };
 };
 
 type QrStartResponse = {
@@ -226,13 +241,14 @@ function qrMessage(status: QrLoginStatus): string {
 
 export default function App() {
   const initialInvite = useMemo(parseInviteFromLocation, []);
-  const [displayName, setDisplayName] = useState("Web 观众");
   const [videoInput, setVideoInput] = useState("");
   const [isResolvingVideo, setIsResolvingVideo] = useState(false);
   const [authProfile, setAuthProfile] = useState<AuthProfile>({
     loggedIn: false,
   });
+  const [authChecked, setAuthChecked] = useState(false);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
+  const [avatarErrored, setAvatarErrored] = useState(false);
   const [qrDialogOpen, setQrDialogOpen] = useState(false);
   const [qrLogin, setQrLogin] = useState<QrLoginState>({
     status: "idle",
@@ -247,6 +263,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [nowPlayingTime, setNowPlayingTime] = useState(0);
+  const [voiceState, setVoiceState] = useState<VoiceSessionState>({
+    status: "idle",
+    muted: false,
+    error: null,
+  });
+  const [voiceVolumes, setVoiceVolumes] = useState<Record<string, number>>({});
+  const [memberVoiceIds, setMemberVoiceIds] = useState<Record<string, string>>(
+    {},
+  );
+  const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>(
+    {},
+  );
+  const [pushToTalkEnabled, setPushToTalkEnabled] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -258,6 +287,9 @@ export default function App() {
   const pendingJoinTokenRef = useRef("");
   const avatarCloseTimerRef = useRef<number | null>(null);
   const sequenceRef = useRef(1);
+  const voiceControllerRef = useRef<VoiceSessionController | null>(null);
+  const duckingControllerRef = useRef<VoiceDuckingController | null>(null);
+  const videoVolumeBeforeDuckingRef = useRef(1);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -266,6 +298,50 @@ export default function App() {
   useEffect(() => {
     roomStateRef.current = roomState;
   }, [roomState]);
+
+  useEffect(() => {
+    setAvatarErrored(false);
+  }, [authProfile.avatarUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all(
+      (roomState?.members ?? []).map(
+        async (member) =>
+          [member.id, await createTrtcUserId(member.id)] as const,
+      ),
+    ).then((entries) => {
+      if (!cancelled) {
+        setMemberVoiceIds(Object.fromEntries(entries));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [roomState?.members]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    const controller = new VoiceDuckingController({
+      onGainChange: (gain) => {
+        if (gain < 1) {
+          videoVolumeBeforeDuckingRef.current = video.volume;
+        }
+        video.volume = Math.max(
+          0,
+          Math.min(1, videoVolumeBeforeDuckingRef.current * gain),
+        );
+      },
+    });
+    duckingControllerRef.current = controller;
+    return () => {
+      controller.dispose();
+      duckingControllerRef.current = null;
+    };
+  }, []);
 
   const sharedVideoSourceKey = useMemo(() => {
     const sharedVideo = roomState?.sharedVideo;
@@ -307,7 +383,8 @@ export default function App() {
           });
         }
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setAuthChecked(true));
   }, []);
 
   const clearAvatarCloseTimer = useCallback(() => {
@@ -466,6 +543,131 @@ export default function App() {
     return true;
   }, []);
 
+  const leaveVoice = useCallback(async () => {
+    const controller = voiceControllerRef.current;
+    voiceControllerRef.current = null;
+    if (controller) {
+      await controller.leave().catch(() => undefined);
+    }
+    duckingControllerRef.current?.dispose();
+    setVoiceVolumes({});
+    setVoiceState({ status: "idle", muted: false, error: null });
+  }, []);
+
+  const joinVoice = useCallback(async () => {
+    const currentSession = sessionRef.current;
+    if (
+      !currentSession ||
+      (voiceState.status !== "idle" && voiceState.status !== "error")
+    ) {
+      return;
+    }
+    setError(null);
+    try {
+      const response = await fetch("/api/web/voice/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          roomCode: currentSession.roomCode,
+          memberToken: currentSession.memberToken,
+        }),
+      });
+      const payload = (await response.json()) as VoiceTokenResponse;
+      if (!response.ok || !payload.ok || !payload.data) {
+        throw new Error(payload.error?.message ?? "无法加入语音");
+      }
+
+      const controller = new VoiceSessionController(
+        await createTrtcVoiceAdapter(),
+        {
+          onStateChange: setVoiceState,
+          onRemoteVolume: (userId, volume) => {
+            setVoiceVolumes((current) => ({ ...current, [userId]: volume }));
+            duckingControllerRef.current?.setSpeaking(userId, volume >= 15);
+          },
+        },
+      );
+      voiceControllerRef.current = controller;
+      await controller.join(payload.data);
+      setNotice("已加入房间语音");
+    } catch (reason) {
+      voiceControllerRef.current = null;
+      const message = reason instanceof Error ? reason.message : "无法加入语音";
+      setVoiceState({ status: "error", muted: true, error: message });
+      setError(message);
+    }
+  }, [voiceState.status]);
+
+  const toggleVoiceMuted = useCallback(async () => {
+    const controller = voiceControllerRef.current;
+    if (!controller) {
+      return;
+    }
+    try {
+      await controller.setMuted(!voiceState.muted);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "麦克风操作失败");
+    }
+  }, [voiceState.muted]);
+
+  useEffect(() => {
+    if (!pushToTalkEnabled || voiceState.status !== "joined") {
+      return;
+    }
+    void voiceControllerRef.current?.setMuted(true);
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null;
+      return Boolean(
+        element?.isContentEditable ||
+        element?.closest("input, textarea, select, [contenteditable='true']"),
+      );
+    };
+    const keyDown = (event: KeyboardEvent) => {
+      if (
+        event.code !== "Space" ||
+        event.repeat ||
+        isEditableTarget(event.target)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      void voiceControllerRef.current?.setMuted(false);
+    };
+    const keyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || isEditableTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      void voiceControllerRef.current?.setMuted(true);
+    };
+    const forceMute = () => {
+      void voiceControllerRef.current?.setMuted(true);
+    };
+    window.addEventListener("keydown", keyDown);
+    window.addEventListener("keyup", keyUp);
+    window.addEventListener("blur", forceMute);
+    return () => {
+      window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("keyup", keyUp);
+      window.removeEventListener("blur", forceMute);
+    };
+  }, [pushToTalkEnabled, voiceState.status]);
+
+  useEffect(
+    () => () => {
+      void voiceControllerRef.current?.leave();
+      voiceControllerRef.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!session) {
+      void leaveVoice();
+    }
+  }, [leaveVoice, session]);
+
   const handleServerMessage = useCallback((message: ServerMessage) => {
     switch (message.type) {
       case "room:created": {
@@ -569,6 +771,8 @@ export default function App() {
     [handleServerMessage],
   );
 
+  const displayName = authProfile.displayName ?? "Web 观众";
+
   const createRoom = useCallback(() => {
     connect((socket) => {
       socket.send(
@@ -607,10 +811,15 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (initialInvite.roomCode && initialInvite.joinToken) {
+    if (authChecked && initialInvite.roomCode && initialInvite.joinToken) {
       autoJoinRoom(initialInvite.roomCode, initialInvite.joinToken);
     }
-  }, [autoJoinRoom, initialInvite.joinToken, initialInvite.roomCode]);
+  }, [
+    autoJoinRoom,
+    authChecked,
+    initialInvite.joinToken,
+    initialInvite.roomCode,
+  ]);
 
   const copyInvite = useCallback(async () => {
     const inviteUrl = session
@@ -953,11 +1162,17 @@ export default function App() {
               aria-label="B站账号菜单"
               onClick={() => setAvatarMenuOpen((current) => !current)}
             >
-              {authProfile.loggedIn && authProfile.avatarUrl ? (
-                <img src={authProfile.avatarUrl} alt="" />
-              ) : (
-                <UserRound size={24} />
-              )}
+              {authProfile.loggedIn ? (
+                <img
+                  src={
+                    authProfile.avatarUrl && !avatarErrored
+                      ? authProfile.avatarUrl
+                      : "/default-avatar.png"
+                  }
+                  alt="用户头像"
+                  onError={() => setAvatarErrored(true)}
+                />
+              ) : null}
             </button>
             {avatarMenuOpen ? (
               <div className="avatar-popover" role="menu">
@@ -1001,14 +1216,6 @@ export default function App() {
             <Users size={18} />
             <span>情侣房间</span>
           </div>
-          <label>
-            昵称
-            <input
-              value={displayName}
-              maxLength={32}
-              onChange={(event) => setDisplayName(event.target.value)}
-            />
-          </label>
           <div className="button-row">
             <button type="button" className="primary" onClick={createRoom}>
               <Radio size={18} />
@@ -1073,15 +1280,116 @@ export default function App() {
           </form>
         </section>
 
+        <section className="panel-section voice-panel">
+          <div className="section-heading voice-heading">
+            <Mic size={18} />
+            <span>房间语音</span>
+            <span className={`voice-status voice-${voiceState.status}`}>
+              {voiceState.status === "joined"
+                ? voiceState.muted
+                  ? "已静音"
+                  : "通话中"
+                : voiceState.status === "joining"
+                  ? "连接中"
+                  : voiceState.status === "error"
+                    ? "不可用"
+                    : "未加入"}
+            </span>
+          </div>
+          <div className="voice-actions">
+            {voiceState.status === "idle" || voiceState.status === "error" ? (
+              <button
+                type="button"
+                className="primary"
+                disabled={!session}
+                onClick={() => {
+                  void joinVoice();
+                }}
+              >
+                <Mic size={18} />
+                加入语音
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={voiceState.status !== "joined"}
+                  onClick={() => void toggleVoiceMuted()}
+                >
+                  {voiceState.muted ? <MicOff size={18} /> : <Mic size={18} />}
+                  {voiceState.muted ? "解除静音" : "麦克风静音"}
+                </button>
+                <button
+                  type="button"
+                  className={pushToTalkEnabled ? "is-active" : ""}
+                  disabled={voiceState.status !== "joined"}
+                  onClick={() => setPushToTalkEnabled((enabled) => !enabled)}
+                  title="启用后按住空格说话"
+                >
+                  按键说话 {pushToTalkEnabled ? "开" : "关"}
+                </button>
+                <button type="button" onClick={() => void leaveVoice()}>
+                  退出语音
+                </button>
+              </>
+            )}
+          </div>
+          {voiceState.error ? (
+            <p className="voice-error">{voiceState.error}</p>
+          ) : null}
+        </section>
+
         <section className="members-strip">
           <div className="section-heading">
             <Users size={18} />
             <span>{roomState?.members.length ?? 0}/2 在线</span>
           </div>
-          <div className="member-list">
-            {(roomState?.members ?? []).map((member) => (
-              <span key={member.id}>{member.name}</span>
-            ))}
+          <div className="member-list voice-member-list">
+            {(roomState?.members ?? []).map((member) => {
+              const voiceUserId = memberVoiceIds[member.id];
+              const volume = voiceUserId ? (voiceVolumes[voiceUserId] ?? 0) : 0;
+              const speaking = volume >= 15;
+              const remoteVolume = memberVolumes[member.id] ?? 100;
+              const isSelf = member.id === session?.memberId;
+              return (
+                <div
+                  key={member.id}
+                  className={`voice-member ${speaking ? "is-speaking" : ""}`}
+                >
+                  <span className="voice-avatar" aria-hidden="true">
+                    {member.name.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span className="voice-member-name">
+                    {member.name}
+                    {isSelf ? "（我）" : ""}
+                  </span>
+                  {!isSelf && voiceState.status === "joined" ? (
+                    <label className="voice-volume">
+                      <span>音量 {remoteVolume}%</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={remoteVolume}
+                        onChange={(event) => {
+                          const nextVolume = Number(event.target.value);
+                          setMemberVolumes((current) => ({
+                            ...current,
+                            [member.id]: nextVolume,
+                          }));
+                          if (voiceUserId) {
+                            voiceControllerRef.current?.setRemoteVolume(
+                              voiceUserId,
+                              nextVolume,
+                            );
+                          }
+                        }}
+                      />
+                    </label>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         </section>
       </aside>

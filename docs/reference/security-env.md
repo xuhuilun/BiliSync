@@ -4,6 +4,14 @@
 
 The server accepts the following environment variables. Safe defaults are built in, but production should set them explicitly. Non-secret settings can also live in `server.config.json`; environment variables always take precedence (see the [deployment guide](../operations/deployment.md)).
 
+## Tencent Cloud TRTC voice
+
+- `TRTC_SDK_APP_ID`: SDKAppID of the Tencent Cloud Real-Time Communication application. Must be configured with `TRTC_SECRET_KEY`.
+- `TRTC_SECRET_KEY`: server-only key used to generate UserSig credentials. Never expose it to Web code.
+- `TRTC_USER_SIG_TTL_SECONDS`: credential lifetime; defaults to `900` seconds and accepts `300` through `86400`.
+
+See [Tencent Cloud TRTC Web voice setup](../voice-trtc-setup.md).
+
 ## Basic Service
 
 - `BILI_SYNCPLAY_CONFIG`: optional path to a JSON config file; when unset, the server looks for `server.config.json` in the current working directory

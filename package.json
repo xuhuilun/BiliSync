@@ -27,7 +27,7 @@
     "typecheck": "npm run typecheck -w @bili-syncplay/protocol && npm run typecheck -w @bili-syncplay/server && npm run typecheck -w @bili-syncplay/extension && npm run typecheck -w @bili-syncplay/web",
     "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension && npm run build -w @bili-syncplay/web",
     "pretest": "npm run build -w @bili-syncplay/protocol",
-    "test": "npm run test:audit-gate && npm run test:scripts && npm run --ignore-scripts test -w @bili-syncplay/protocol && npm run --ignore-scripts test -w @bili-syncplay/server && npm run --ignore-scripts test -w @bili-syncplay/extension",
+    "test": "npm run test:audit-gate && npm run test:scripts && npm run --ignore-scripts test -w @bili-syncplay/protocol && npm run --ignore-scripts test -w @bili-syncplay/server && npm run --ignore-scripts test -w @bili-syncplay/extension && npm run --ignore-scripts test -w @bili-syncplay/web",
     "test:scripts": "node --test scripts/target-browser.test.mjs",
     "coverage": "npm run --ignore-scripts coverage -w @bili-syncplay/protocol && npm run --ignore-scripts coverage -w @bili-syncplay/server && npm run --ignore-scripts coverage -w @bili-syncplay/extension",
     "audit": "node scripts/audit-gate.mjs",

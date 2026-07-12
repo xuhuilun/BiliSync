@@ -11,6 +11,46 @@ import {
   logEffectiveOriginPolicy,
   loadSecurityConfig,
 } from "../src/config/security-config.js";
+import { loadTrtcConfig } from "../src/config/trtc-config.js";
+
+test("TRTC config is disabled when credentials are absent", () => {
+  assert.equal(loadTrtcConfig({}), null);
+});
+
+test("TRTC config requires SDKAppID and secret key together", () => {
+  assert.throws(
+    () => loadTrtcConfig({ TRTC_SDK_APP_ID: "1400000001" }),
+    /TRTC_SECRET_KEY/,
+  );
+  assert.throws(
+    () => loadTrtcConfig({ TRTC_SECRET_KEY: "secret" }),
+    /TRTC_SDK_APP_ID/,
+  );
+});
+
+test("TRTC config parses credentials and bounded credential ttl", () => {
+  assert.deepEqual(
+    loadTrtcConfig({
+      TRTC_SDK_APP_ID: "1400000001",
+      TRTC_SECRET_KEY: " secret-key ",
+      TRTC_USER_SIG_TTL_SECONDS: "900",
+    }),
+    {
+      sdkAppId: 1400000001,
+      secretKey: "secret-key",
+      expireSeconds: 900,
+    },
+  );
+  assert.throws(
+    () =>
+      loadTrtcConfig({
+        TRTC_SDK_APP_ID: "1400000001",
+        TRTC_SECRET_KEY: "secret-key",
+        TRTC_USER_SIG_TTL_SECONDS: "30",
+      }),
+    /between 300 and 86400/,
+  );
+});
 
 test("security config reads overrides and keeps defaults for missing values", () => {
   const config = loadSecurityConfig({

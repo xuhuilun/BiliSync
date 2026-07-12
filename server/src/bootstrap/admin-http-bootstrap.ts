@@ -120,6 +120,10 @@ export async function createSharedAdminHttpBootstrap(args: {
             args.runtimeStore.findMemberIdByToken(roomCode, memberToken) !==
               null,
           ),
+        resolveMemberIdByToken: (roomCode, memberToken) =>
+          Promise.resolve(
+            args.runtimeStore.findMemberIdByToken(roomCode, memberToken),
+          ),
       },
       now: args.now,
     }),

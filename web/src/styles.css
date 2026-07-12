@@ -412,6 +412,118 @@ h3 {
   font-size: 13px;
 }
 
+.voice-heading {
+  justify-content: space-between;
+}
+
+.voice-heading > span:first-of-type {
+  margin-right: auto;
+}
+
+.voice-status {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.voice-joined {
+  color: var(--green);
+  background: #e6f4ea;
+}
+
+.voice-joining {
+  color: #8a5b00;
+  background: #fef7e0;
+}
+
+.voice-error,
+.voice-error.voice-status {
+  color: var(--red);
+}
+
+.voice-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.voice-actions > :only-child {
+  grid-column: 1 / -1;
+}
+
+.voice-actions button.is-active {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: #f3f8ff;
+}
+
+.voice-member-list {
+  display: grid;
+  gap: 8px;
+}
+
+.voice-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.voice-avatar {
+  width: 32px;
+  height: 32px;
+  display: grid !important;
+  place-items: center;
+  padding: 0 !important;
+  border: 2px solid transparent !important;
+  border-radius: 999px;
+  background: var(--soft) !important;
+  color: var(--ink) !important;
+  font-weight: 700;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.voice-member.is-speaking .voice-avatar {
+  border-color: #34a853 !important;
+  box-shadow: 0 0 0 4px rgba(52, 168, 83, 0.16);
+}
+
+.voice-member-name {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--ink) !important;
+  font-weight: 600;
+}
+
+.voice-volume {
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.voice-volume > span {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: nowrap;
+}
+
+.voice-volume input[type="range"] {
+  padding: 0;
+  box-shadow: none;
+}
+
 .watch-stage {
   min-width: 0;
   border-radius: 32px;

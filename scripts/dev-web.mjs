@@ -89,15 +89,11 @@ const serverHttpUrl = `http://127.0.0.1:${serverPort}`;
 console.log(`[dev] Server: http://localhost:${serverPort}`);
 console.log(`[dev] Web:    ${webOrigin}`);
 
-startProcess(
-  "server",
-  ["run", "dev", "-w", "@bili-syncplay/server"],
-  {
-    PORT: String(serverPort),
-    ALLOWED_ORIGINS: webOrigin,
-    MAX_MEMBERS_PER_ROOM: "2",
-  },
-);
+startProcess("server", ["run", "dev", "-w", "@bili-syncplay/server"], {
+  PORT: String(serverPort),
+  ALLOWED_ORIGINS: webOrigin,
+  MAX_MEMBERS_PER_ROOM: "2",
+});
 
 startProcess(
   "web",

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -31,6 +31,10 @@ export type WebRoomService = {
     roomCode: string,
     memberToken: string,
   ) => Promise<boolean>;
+  resolveMemberIdByToken: (
+    roomCode: string,
+    memberToken: string,
+  ) => Promise<string | null>;
 };
 
 export type BilibiliFetchResponse = {
@@ -69,6 +73,12 @@ export type WebRouteDependencies = {
   fetch?: BilibiliFetch;
   createToken?: () => string;
   authSessionStore?: WebAuthSessionStore;
+  trtc?: {
+    sdkAppId: number;
+    expireSeconds: number;
+    generateUserSig: (userId: string) => string;
+    generatePrivateMapKey: (userId: string, roomId: string) => string;
+  };
 };
 
 type BilibiliQrLoginSession = {
@@ -99,6 +109,11 @@ type ResolveVideoRequest = {
   input?: unknown;
 };
 
+type VoiceTokenRequest = {
+  roomCode?: unknown;
+  memberToken?: unknown;
+};
+
 type BilibiliVideoInfo = {
   bvid: string | null;
   aid: number | null;
@@ -114,6 +129,70 @@ type BilibiliVideoInfo = {
 
 function defaultCreateToken(): string {
   return randomBytes(24).toString("base64url");
+}
+
+function createTrtcUserId(memberId: string): string {
+  const digest = createHash("sha256")
+    .update(memberId)
+    .digest("hex")
+    .slice(0, 28);
+  return `web_${digest}`;
+}
+
+async function handleVoiceToken(args: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  roomService?: WebRoomService;
+  trtc?: NonNullable<WebRouteDependencies["trtc"]>;
+}): Promise<void> {
+  if (args.request.method !== "POST") {
+    writeError(args.response, 405, "method_not_allowed", "Method not allowed.");
+    return;
+  }
+  if (!args.trtc || !args.roomService) {
+    writeError(
+      args.response,
+      503,
+      "voice_unavailable",
+      "Voice chat is not configured.",
+    );
+    return;
+  }
+
+  const body = (await readJsonBody(args.request)) as VoiceTokenRequest;
+  const roomCode =
+    typeof body.roomCode === "string" ? body.roomCode.trim().toUpperCase() : "";
+  const memberToken =
+    typeof body.memberToken === "string" ? body.memberToken.trim() : "";
+  if (
+    !/^[A-Z0-9]{6}$/.test(roomCode) ||
+    !memberToken ||
+    !(await args.roomService.isMemberTokenInRoom(roomCode, memberToken))
+  ) {
+    writeError(args.response, 404, "not_found", "Not found.");
+    return;
+  }
+
+  const memberId = await args.roomService.resolveMemberIdByToken(
+    roomCode,
+    memberToken,
+  );
+  if (!memberId) {
+    writeError(args.response, 404, "not_found", "Not found.");
+    return;
+  }
+  const userId = createTrtcUserId(memberId);
+  writeJson(args.response, 200, {
+    ok: true,
+    data: {
+      sdkAppId: args.trtc.sdkAppId,
+      userId,
+      userSig: args.trtc.generateUserSig(userId),
+      privateMapKey: args.trtc.generatePrivateMapKey(userId, roomCode),
+      roomId: roomCode,
+      expiresInSeconds: args.trtc.expireSeconds,
+    },
+  });
 }
 
 function defaultFetch(
@@ -1617,6 +1696,16 @@ export async function tryHandleWebRoutes(args: {
   const fetchImpl = args.dependencies?.fetch ?? defaultFetch;
   const createToken = args.dependencies?.createToken ?? defaultCreateToken;
   const now = args.now ?? Date.now;
+
+  if (args.pathname === "/api/web/voice/token") {
+    await handleVoiceToken({
+      request: args.request,
+      response: args.response,
+      roomService: args.roomService,
+      trtc: args.dependencies?.trtc,
+    });
+    return true;
+  }
 
   if (args.pathname === "/api/web/auth/bilibili/login/start") {
     await handleBilibiliLoginStart({

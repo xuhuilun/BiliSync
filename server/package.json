@@ -18,6 +18,7 @@
   "dependencies": {
     "@bili-syncplay/protocol": "1.2.4",
     "ioredis": "^5.10.0",
+    "tls-sig-api-v2": "^1.0.2",
     "ws": "^8.21.0"
   },
   "devDependencies": {
