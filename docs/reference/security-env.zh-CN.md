@@ -4,6 +4,13 @@
 
 服务器支持以下环境变量。虽然内置了安全默认值，但生产环境应显式设置。非敏感配置也可以写入 `server.config.json`；环境变量始终优先（见[部署指南](../operations/deployment.zh-CN.md)）。
 
+## B站媒体传输
+
+- `BILIBILI_MEDIA_DELIVERY_MODE`：控制 Web 视频传输模式。默认
+  `direct-first`，优先返回 B站 CDN 地址，并把服务器代理保留为最后的自动
+  回退线路；`proxy-only` 是紧急回滚模式，只返回服务器代理。两种模式都不会
+  把 B站 Cookie 下发到浏览器。
+
 ## 基础服务
 
 - `BILI_SYNCPLAY_CONFIG`：可选的 JSON 配置文件路径；未设置时会优先查找当前工作目录下的 `server.config.json`

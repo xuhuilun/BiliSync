@@ -6,12 +6,32 @@ import {
 } from "../src/config/admin-config.js";
 import { parseBooleanEnv, parseIntegerEnv } from "../src/config/env.js";
 import { loadPersistenceConfig } from "../src/config/persistence-config.js";
+import { loadMediaDeliveryConfig } from "../src/config/media-delivery-config.js";
 import {
   assertAllowedOriginsStartupPolicy,
   logEffectiveOriginPolicy,
   loadSecurityConfig,
 } from "../src/config/security-config.js";
 import { loadTrtcConfig } from "../src/config/trtc-config.js";
+
+test("media delivery defaults to direct-first and supports proxy-only rollback", () => {
+  assert.deepEqual(loadMediaDeliveryConfig({}), {
+    mode: "direct-first",
+  });
+  assert.deepEqual(
+    loadMediaDeliveryConfig({
+      BILIBILI_MEDIA_DELIVERY_MODE: "proxy-only",
+    }),
+    { mode: "proxy-only" },
+  );
+  assert.throws(
+    () =>
+      loadMediaDeliveryConfig({
+        BILIBILI_MEDIA_DELIVERY_MODE: "direct-only",
+      }),
+    /direct-first.*proxy-only/,
+  );
+});
 
 test("TRTC config is disabled when credentials are absent", () => {
   assert.equal(loadTrtcConfig({}), null);

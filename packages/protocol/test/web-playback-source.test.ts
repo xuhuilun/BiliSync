@@ -94,6 +94,26 @@ test("playback source manifest guard accepts same-origin media proxy variants", 
   );
 });
 
+test("playback source manifest accepts long signed CDN urls", () => {
+  const signedUrl = `https://upos.example.test/video.mp4?token=${"a".repeat(900)}`;
+  assert.equal(
+    isPlaybackSourceManifest({
+      videoId: "BV1xx411c7mD:456",
+      title: "Long movie",
+      expiresAt: Date.now() + 60_000,
+      variants: [
+        {
+          kind: "mp4",
+          url: signedUrl,
+          mimeType: "video/mp4",
+          label: "B站 CDN",
+        },
+      ],
+    }),
+    true,
+  );
+});
+
 test("playback source manifest guard rejects unsupported protocols", () => {
   assert.equal(
     isPlaybackSourceManifest({

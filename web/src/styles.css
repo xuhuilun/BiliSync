@@ -620,6 +620,20 @@ h3 {
   background: #fce8e6;
 }
 
+.playback-error-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.playback-error-line button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  color: var(--red);
+  border-color: #f4c7c3;
+}
+
 .rules-row {
   display: flex;
   flex-wrap: wrap;

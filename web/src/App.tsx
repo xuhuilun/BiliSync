@@ -26,6 +26,10 @@ import {
   type VoiceSessionState,
 } from "./voice/voice-session.js";
 import {
+  decidePlaybackFallback,
+  MediaFallbackTimer,
+} from "./playback-source-fallback.js";
+import {
   isPlaybackSourceManifest,
   isServerMessage,
   PROTOCOL_VERSION,
@@ -260,6 +264,7 @@ export default function App() {
   const [session, setSession] = useState<RoomSession | null>(null);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [manifest, setManifest] = useState<PlaybackSourceManifest | null>(null);
+  const [activeVariantIndex, setActiveVariantIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [nowPlayingTime, setNowPlayingTime] = useState(0);
@@ -290,6 +295,13 @@ export default function App() {
   const voiceControllerRef = useRef<VoiceSessionController | null>(null);
   const duckingControllerRef = useRef<VoiceDuckingController | null>(null);
   const videoVolumeBeforeDuckingRef = useRef(1);
+  const fallbackTimerRef = useRef<MediaFallbackTimer | null>(null);
+  const fallbackInFlightRef = useRef(false);
+  const playbackResumeRef = useRef<{
+    currentTime: number;
+    playbackRate: number;
+    shouldPlay: boolean;
+  } | null>(null);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -852,9 +864,13 @@ export default function App() {
     if (!isPlaybackSourceManifest(payload.data?.playbackSource)) {
       throw new Error("播放源清单格式无效");
     }
-    setManifest(
-      attachRoomCredentialsToManifest(payload.data.playbackSource, nextSession),
+    const nextManifest = attachRoomCredentialsToManifest(
+      payload.data.playbackSource,
+      nextSession,
     );
+    setActiveVariantIndex(0);
+    setManifest(nextManifest);
+    return nextManifest;
   }, []);
 
   useEffect(() => {
@@ -867,6 +883,7 @@ export default function App() {
         sharedVideo.sourceProvider !== "authorized-bilibili")
     ) {
       setManifest(null);
+      setActiveVariantIndex(0);
       return;
     }
     void loadPlaybackSource(currentSession).catch((reason: unknown) => {
@@ -891,7 +908,13 @@ export default function App() {
     setError(null);
     setNotice(null);
     try {
-      const body = isDirectMediaInput(input) ? { url: input } : { input };
+      const body = isDirectMediaInput(input)
+        ? { url: input }
+        : {
+            input,
+            roomCode: currentSession.roomCode,
+            memberToken: currentSession.memberToken,
+          };
       const response = await fetch("/api/web/video/resolve", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -905,6 +928,7 @@ export default function App() {
       }
 
       autoplayAfterResolveRef.current = true;
+      setActiveVariantIndex(0);
       setManifest(
         attachRoomCredentialsToManifest(
           payload.data.playbackSource,
@@ -937,7 +961,92 @@ export default function App() {
     }
   }, [sendMessage, videoInput]);
 
-  const activeVariant = manifest?.variants[0] ?? null;
+  const rememberPlaybackForSourceSwitch = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    playbackResumeRef.current = {
+      currentTime: video.currentTime,
+      playbackRate: video.playbackRate,
+      shouldPlay: !video.paused,
+    };
+    suppressLocalPlaybackEventsUntilRef.current = Date.now() + 1_500;
+  }, []);
+
+  const fallbackPlaybackSource = useCallback(
+    async (reason: "media-error" | "metadata-timeout" | "stalled") => {
+      if (fallbackInFlightRef.current || !manifest) {
+        return;
+      }
+      fallbackInFlightRef.current = true;
+      fallbackTimerRef.current?.dispose();
+      rememberPlaybackForSourceSwitch();
+      try {
+        const decision = decidePlaybackFallback({
+          manifest,
+          activeVariantIndex,
+          now: Date.now(),
+        });
+        if (decision.kind === "refresh") {
+          const currentSession = sessionRef.current;
+          if (!currentSession) {
+            throw new Error("当前房间会话已失效");
+          }
+          await loadPlaybackSource(currentSession);
+          setNotice("播放地址已刷新");
+          return;
+        }
+        if (decision.kind === "next") {
+          setActiveVariantIndex(decision.variantIndex);
+          setNotice(
+            decision.variantIndex === manifest.variants.length - 1
+              ? "CDN 直连不可用，已切换服务器代理"
+              : "正在尝试备用 CDN",
+          );
+          return;
+        }
+        playbackResumeRef.current = null;
+        const reasonLabel =
+          reason === "media-error"
+            ? "视频加载错误"
+            : reason === "metadata-timeout"
+              ? "视频加载超时"
+              : "视频持续卡顿";
+        setError(`${reasonLabel}，所有播放线路均不可用，请重新获取播放地址`);
+      } catch (reason) {
+        playbackResumeRef.current = null;
+        setError(reason instanceof Error ? reason.message : "无法刷新播放地址");
+      } finally {
+        fallbackInFlightRef.current = false;
+      }
+    },
+    [
+      activeVariantIndex,
+      loadPlaybackSource,
+      manifest,
+      rememberPlaybackForSourceSwitch,
+    ],
+  );
+
+  const retryPlaybackSource = useCallback(async () => {
+    const currentSession = sessionRef.current;
+    if (!currentSession) {
+      setError("请先创建或加入房间");
+      return;
+    }
+    rememberPlaybackForSourceSwitch();
+    setError(null);
+    try {
+      await loadPlaybackSource(currentSession);
+      setNotice("已重新获取播放地址");
+    } catch (reason) {
+      playbackResumeRef.current = null;
+      setError(reason instanceof Error ? reason.message : "无法刷新播放地址");
+    }
+  }, [loadPlaybackSource, rememberPlaybackForSourceSwitch]);
+
+  const activeVariant = manifest?.variants[activeVariantIndex] ?? null;
 
   useEffect(() => {
     const video = videoRef.current;
@@ -947,8 +1056,34 @@ export default function App() {
 
     hlsRef.current?.destroy();
     hlsRef.current = null;
+    video.setAttribute("referrerpolicy", "no-referrer");
     video.removeAttribute("src");
     video.load();
+
+    const timer = new MediaFallbackTimer((reason) => {
+      void fallbackPlaybackSource(reason);
+    });
+    fallbackTimerRef.current = timer;
+    timer.armMetadataTimeout();
+
+    const restorePlayback = () => {
+      timer.markMetadataLoaded();
+      const resume = playbackResumeRef.current;
+      if (!resume) {
+        return;
+      }
+      playbackResumeRef.current = null;
+      video.playbackRate = resume.playbackRate;
+      if (Number.isFinite(resume.currentTime) && resume.currentTime > 0) {
+        video.currentTime = resume.currentTime;
+      }
+      if (resume.shouldPlay) {
+        void video.play().catch(() => {
+          setError("浏览器阻止了自动恢复播放，请点击播放器继续");
+        });
+      }
+    };
+    video.addEventListener("loadedmetadata", restorePlayback);
 
     const playAfterResolve = () => {
       if (!autoplayAfterResolveRef.current) {
@@ -989,9 +1124,14 @@ export default function App() {
     return () => {
       hlsRef.current?.destroy();
       hlsRef.current = null;
+      timer.dispose();
+      if (fallbackTimerRef.current === timer) {
+        fallbackTimerRef.current = null;
+      }
+      video.removeEventListener("loadedmetadata", restorePlayback);
       video.removeEventListener("loadedmetadata", playAfterResolve);
     };
-  }, [activeVariant]);
+  }, [activeVariant, fallbackPlaybackSource]);
 
   const sendPlaybackUpdate = useCallback(
     (syncIntent?: PlaybackState["syncIntent"]) => {
@@ -1414,14 +1554,20 @@ export default function App() {
             controls
             playsInline
             poster={manifest?.posterUrl}
-            onPlay={() => sendPlaybackUpdate()}
+            onPlay={() => {
+              fallbackTimerRef.current?.markPlayable();
+              sendPlaybackUpdate();
+            }}
+            onCanPlay={() => fallbackTimerRef.current?.markPlayable()}
+            onWaiting={() => fallbackTimerRef.current?.armStallTimeout()}
+            onStalled={() => fallbackTimerRef.current?.armStallTimeout()}
             onPause={() => sendPlaybackUpdate()}
             onSeeked={() => sendPlaybackUpdate("explicit-seek")}
             onTimeUpdate={() => {
               setNowPlayingTime(videoRef.current?.currentTime ?? 0);
             }}
             onError={() => {
-              setError("视频加载失败，请确认账号有观看权限后重新解析");
+              void fallbackPlaybackSource("media-error");
             }}
           />
         </div>
@@ -1442,7 +1588,16 @@ export default function App() {
         </div>
 
         {notice ? <p className="notice-line">{notice}</p> : null}
-        {error ? <p className="error-line">{error}</p> : null}
+        {error ? (
+          <div className="error-line playback-error-line">
+            <span>{error}</span>
+            {session && roomState?.sharedVideo ? (
+              <button type="button" onClick={() => void retryPlaybackSource()}>
+                重新获取播放地址
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="rules-row">
           <span>

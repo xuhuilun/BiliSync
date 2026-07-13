@@ -56,6 +56,12 @@ export type MetricsCollector = {
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
+  recordWebMediaManifestIssued: (
+    mode: "direct-first" | "proxy-only",
+    directCandidateCount: number,
+  ) => void;
+  recordWebMediaProxyRequest: () => void;
+  recordWebMediaProxyBytes: (bytes: number) => void;
   render: () => Promise<string>;
 };
 
@@ -148,6 +154,13 @@ export function createMetricsCollector(options: {
     help: "Total room event publishes dropped after backpressure timeout, grouped by event type",
     samples: new Map(),
   };
+  const webMediaManifestCounter: CounterMetric = {
+    help: "Total Bilibili playback manifests issued by delivery mode",
+    samples: new Map(),
+  };
+  let webMediaDirectCandidateCount = 0;
+  let webMediaProxyRequestCount = 0;
+  let webMediaProxyBytes = 0;
   const messageDurationHistogram: HistogramMetric = {
     help: "Duration of monitored message handler paths in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -305,6 +318,37 @@ export function createMetricsCollector(options: {
           sample.labels,
         ),
       ),
+      "# HELP bili_syncplay_web_media_manifests_total Total Bilibili playback manifests issued by delivery mode",
+      "# TYPE bili_syncplay_web_media_manifests_total counter",
+      ...Array.from(webMediaManifestCounter.samples.values())
+        .sort((left, right) =>
+          (left.labels.mode ?? "").localeCompare(right.labels.mode ?? ""),
+        )
+        .map((sample) =>
+          formatMetricLine(
+            "bili_syncplay_web_media_manifests_total",
+            sample.value,
+            sample.labels,
+          ),
+        ),
+      "# HELP bili_syncplay_web_media_direct_candidates_total Total direct CDN candidates included in issued manifests",
+      "# TYPE bili_syncplay_web_media_direct_candidates_total counter",
+      formatMetricLine(
+        "bili_syncplay_web_media_direct_candidates_total",
+        webMediaDirectCandidateCount,
+      ),
+      "# HELP bili_syncplay_web_media_proxy_requests_total Total media proxy requests",
+      "# TYPE bili_syncplay_web_media_proxy_requests_total counter",
+      formatMetricLine(
+        "bili_syncplay_web_media_proxy_requests_total",
+        webMediaProxyRequestCount,
+      ),
+      "# HELP bili_syncplay_web_media_proxy_bytes_total Total declared upstream bytes served by the media proxy",
+      "# TYPE bili_syncplay_web_media_proxy_bytes_total counter",
+      formatMetricLine(
+        "bili_syncplay_web_media_proxy_bytes_total",
+        webMediaProxyBytes,
+      ),
     ];
 
     for (const { name, metric } of histogramMetrics) {
@@ -386,6 +430,18 @@ export function createMetricsCollector(options: {
       incrementCounter(roomEventPublishDroppedCounter, {
         event_type: eventType,
       });
+    },
+    recordWebMediaManifestIssued(mode, directCandidateCount) {
+      incrementCounter(webMediaManifestCounter, { mode });
+      webMediaDirectCandidateCount += Math.max(0, directCandidateCount);
+    },
+    recordWebMediaProxyRequest() {
+      webMediaProxyRequestCount += 1;
+    },
+    recordWebMediaProxyBytes(bytes) {
+      if (Number.isFinite(bytes) && bytes > 0) {
+        webMediaProxyBytes += bytes;
+      }
     },
     render,
   };

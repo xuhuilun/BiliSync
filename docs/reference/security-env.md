@@ -12,6 +12,13 @@ The server accepts the following environment variables. Safe defaults are built 
 
 See [Tencent Cloud TRTC Web voice setup](../voice-trtc-setup.md).
 
+## Bilibili media delivery
+
+- `BILIBILI_MEDIA_DELIVERY_MODE`: controls Web video delivery. `direct-first`
+  (default) returns Bilibili CDN URLs first and keeps the server proxy as the
+  final fallback. `proxy-only` is the emergency rollback mode and returns only
+  the server proxy URL. Bilibili cookies remain server-side in both modes.
+
 ## Basic Service
 
 - `BILI_SYNCPLAY_CONFIG`: optional path to a JSON config file; when unset, the server looks for `server.config.json` in the current working directory

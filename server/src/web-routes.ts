@@ -13,6 +13,7 @@ import {
   type SharedVideo,
 } from "@bili-syncplay/protocol";
 import type { PersistedRoom } from "./types.js";
+import type { BilibiliMediaDeliveryMode } from "./config/media-delivery-config.js";
 
 const DIRECT_SOURCE_TTL_MS = 20 * 60 * 1000;
 const BILIBILI_AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -73,6 +74,15 @@ export type WebRouteDependencies = {
   fetch?: BilibiliFetch;
   createToken?: () => string;
   authSessionStore?: WebAuthSessionStore;
+  mediaDeliveryMode?: BilibiliMediaDeliveryMode;
+  mediaMetrics?: {
+    recordManifestIssued: (
+      mode: BilibiliMediaDeliveryMode,
+      directCandidateCount: number,
+    ) => void;
+    recordProxyRequest: () => void;
+    recordProxyBytes: (bytes: number) => void;
+  };
   trtc?: {
     sdkAppId: number;
     expireSeconds: number;
@@ -94,6 +104,11 @@ type BilibiliMediaToken = {
   expiresAt: number;
 };
 
+type BilibiliMediaSources = {
+  primaryUrl: string;
+  backupUrls: string[];
+};
+
 export type WebRouteState = {
   authSessions: Map<string, BilibiliAuthSession>;
   authSessionsLoaded: boolean;
@@ -107,6 +122,8 @@ type ResolveVideoRequest = {
   url?: unknown;
   title?: unknown;
   input?: unknown;
+  roomCode?: unknown;
+  memberToken?: unknown;
 };
 
 type VoiceTokenRequest = {
@@ -1056,28 +1073,41 @@ async function resolveBilibiliVideoInfo(args: {
   });
 }
 
-async function resolveBilibiliMediaUrl(args: {
+async function resolveBilibiliMediaSources(args: {
   info: BilibiliVideoInfo;
   cookie: string;
   fetchImpl: BilibiliFetch;
-}): Promise<string> {
+}): Promise<BilibiliMediaSources> {
   const response = await args.fetchImpl(createBilibiliPlayUrl(args.info), {
     headers: buildBilibiliHeaders(args.cookie, args.info.normalizedUrl),
   });
   const data = assertBilibiliOk(await response.json());
   const durl = Array.isArray(data.durl) ? data.durl : [];
   const first = readRecord(durl[0]);
-  const mediaUrl = first?.url;
-  if (typeof mediaUrl !== "string" || !parseHttpUrl(mediaUrl)) {
+  const primaryUrl = first?.url;
+  if (typeof primaryUrl !== "string" || !parseHttpUrl(primaryUrl)) {
     throw new Error("bilibili_media_url_missing");
   }
-  return mediaUrl;
+  const seen = new Set([primaryUrl]);
+  const backupUrls = (Array.isArray(first?.backup_url) ? first.backup_url : [])
+    .filter((value): value is string => typeof value === "string")
+    .filter((value) => parseHttpUrl(value) !== null)
+    .filter((value) => {
+      if (seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+  return { primaryUrl, backupUrls };
 }
 
 function createBilibiliManifest(args: {
   info: BilibiliVideoInfo;
+  mediaSources: BilibiliMediaSources;
   mediaToken: string;
   expiresAt: number;
+  deliveryMode?: BilibiliMediaDeliveryMode;
   roomCode?: string;
   memberToken?: string;
 }): PlaybackSourceManifest {
@@ -1085,18 +1115,35 @@ function createBilibiliManifest(args: {
     args.roomCode && args.memberToken
       ? `?roomCode=${encodeURIComponent(args.roomCode)}&memberToken=${encodeURIComponent(args.memberToken)}`
       : "";
+  const proxyVariant: PlaybackSourceVariant = {
+    kind: "mp4",
+    url: `/api/web/media/${args.mediaToken}/video.mp4${query}`,
+    mimeType: "video/mp4",
+    label: "服务器代理",
+  };
+  const variants =
+    args.deliveryMode === "proxy-only"
+      ? [proxyVariant]
+      : [
+          {
+            kind: "mp4" as const,
+            url: args.mediaSources.primaryUrl,
+            mimeType: "video/mp4",
+            label: "B站 CDN",
+          },
+          ...args.mediaSources.backupUrls.map((url, index) => ({
+            kind: "mp4" as const,
+            url,
+            mimeType: "video/mp4",
+            label: `B站备用 CDN ${index + 1}`,
+          })),
+          proxyVariant,
+        ];
   return {
     videoId: args.info.videoId,
     title: args.info.title,
     expiresAt: args.expiresAt,
-    variants: [
-      {
-        kind: "mp4",
-        url: `/api/web/media/${args.mediaToken}/video.mp4${query}`,
-        mimeType: "video/mp4",
-        label: "B站代理",
-      },
-    ],
+    variants,
     ...(args.info.posterUrl ? { posterUrl: args.info.posterUrl } : {}),
   };
 }
@@ -1379,9 +1426,12 @@ async function handleBilibiliLogout(args: {
 async function handleVideoResolve(args: {
   request: IncomingMessage;
   response: ServerResponse;
+  roomService?: WebRoomService;
   state: WebRouteState;
   fetchImpl: BilibiliFetch;
   createToken: () => string;
+  mediaDeliveryMode?: BilibiliMediaDeliveryMode;
+  mediaMetrics?: WebRouteDependencies["mediaMetrics"];
   now: () => number;
 }): Promise<void> {
   if (args.request.method !== "POST") {
@@ -1437,13 +1487,27 @@ async function handleVideoResolve(args: {
       );
       return;
     }
+    const isCurrentRoomMember =
+      args.roomService &&
+      typeof request.roomCode === "string" &&
+      typeof request.memberToken === "string"
+        ? await args.roomService.isMemberTokenInRoom(
+            request.roomCode,
+            request.memberToken,
+          )
+        : false;
+    const deliveryMode: BilibiliMediaDeliveryMode =
+      (args.mediaDeliveryMode ?? "direct-first") === "direct-first" &&
+      isCurrentRoomMember
+        ? "direct-first"
+        : "proxy-only";
 
     const info = await resolveBilibiliVideoInfo({
       input: trimmedInput,
       cookie: authSession.cookie,
       fetchImpl: args.fetchImpl,
     });
-    const mediaUrl = await resolveBilibiliMediaUrl({
+    const mediaSources = await resolveBilibiliMediaSources({
       info,
       cookie: authSession.cookie,
       fetchImpl: args.fetchImpl,
@@ -1452,11 +1516,15 @@ async function handleVideoResolve(args: {
     const mediaToken = args.createToken();
     const expiresAt = args.now() + BILIBILI_MEDIA_TOKEN_TTL_MS;
     args.state.mediaTokens.set(mediaToken, {
-      url: mediaUrl,
+      url: mediaSources.primaryUrl,
       cookie: authSession.cookie,
       referer: info.normalizedUrl,
       expiresAt,
     });
+    args.mediaMetrics?.recordManifestIssued(
+      deliveryMode,
+      deliveryMode === "proxy-only" ? 0 : 1 + mediaSources.backupUrls.length,
+    );
 
     writeJson(args.response, 200, {
       ok: true,
@@ -1464,8 +1532,10 @@ async function handleVideoResolve(args: {
         video: createBilibiliSharedVideo(info),
         playbackSource: createBilibiliManifest({
           info,
+          mediaSources,
           mediaToken,
           expiresAt,
+          deliveryMode,
         }),
       },
     });
@@ -1511,6 +1581,8 @@ async function handlePlaybackSource(args: {
   state: WebRouteState;
   fetchImpl: BilibiliFetch;
   createToken: () => string;
+  mediaDeliveryMode?: BilibiliMediaDeliveryMode;
+  mediaMetrics?: WebRouteDependencies["mediaMetrics"];
   now: () => number;
 }): Promise<void> {
   if (!args.roomService) {
@@ -1591,7 +1663,7 @@ async function handlePlaybackSource(args: {
     duration: sharedVideo.duration,
   };
   try {
-    const mediaUrl = await resolveBilibiliMediaUrl({
+    const mediaSources = await resolveBilibiliMediaSources({
       info,
       cookie: authSession.cookie,
       fetchImpl: args.fetchImpl,
@@ -1599,18 +1671,25 @@ async function handlePlaybackSource(args: {
     const mediaToken = args.createToken();
     const expiresAt = args.now() + BILIBILI_MEDIA_TOKEN_TTL_MS;
     args.state.mediaTokens.set(mediaToken, {
-      url: mediaUrl,
+      url: mediaSources.primaryUrl,
       cookie: authSession.cookie,
       referer: info.normalizedUrl,
       expiresAt,
     });
+    const deliveryMode = args.mediaDeliveryMode ?? "direct-first";
+    args.mediaMetrics?.recordManifestIssued(
+      deliveryMode,
+      deliveryMode === "proxy-only" ? 0 : 1 + mediaSources.backupUrls.length,
+    );
     writeJson(args.response, 200, {
       ok: true,
       data: {
         playbackSource: createBilibiliManifest({
           info,
+          mediaSources,
           mediaToken,
           expiresAt,
+          deliveryMode: args.mediaDeliveryMode,
           roomCode: args.roomCode,
           memberToken,
         }),
@@ -1634,6 +1713,7 @@ async function handleMediaProxy(args: {
   state: WebRouteState;
   fetchImpl: BilibiliFetch;
   now: () => number;
+  mediaMetrics?: WebRouteDependencies["mediaMetrics"];
 }): Promise<void> {
   if (!args.roomService) {
     writeError(args.response, 404, "not_found", "Not found.");
@@ -1668,10 +1748,15 @@ async function handleMediaProxy(args: {
   if (typeof range === "string") {
     headers.range = range;
   }
+  args.mediaMetrics?.recordProxyRequest();
   const upstream = await args.fetchImpl(token.url, { headers });
   if (!upstream.ok) {
     writeError(args.response, 502, "media_proxy_failed", "Media proxy failed.");
     return;
+  }
+  const declaredContentLength = Number(upstream.headers.get("content-length"));
+  if (Number.isFinite(declaredContentLength) && declaredContentLength > 0) {
+    args.mediaMetrics?.recordProxyBytes(declaredContentLength);
   }
   await pipeMediaProxyResponse({
     response: args.response,
@@ -1744,9 +1829,12 @@ export async function tryHandleWebRoutes(args: {
     await handleVideoResolve({
       request: args.request,
       response: args.response,
+      roomService: args.roomService,
       state,
       fetchImpl,
       createToken,
+      mediaDeliveryMode: args.dependencies?.mediaDeliveryMode,
+      mediaMetrics: args.dependencies?.mediaMetrics,
       now,
     });
     return true;
@@ -1763,6 +1851,7 @@ export async function tryHandleWebRoutes(args: {
       roomService: args.roomService,
       state,
       fetchImpl,
+      mediaMetrics: args.dependencies?.mediaMetrics,
       now,
     });
     return true;
@@ -1783,6 +1872,8 @@ export async function tryHandleWebRoutes(args: {
     state,
     fetchImpl,
     createToken,
+    mediaDeliveryMode: args.dependencies?.mediaDeliveryMode,
+    mediaMetrics: args.dependencies?.mediaMetrics,
     now,
   });
   return true;

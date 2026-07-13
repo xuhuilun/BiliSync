@@ -4,6 +4,7 @@ import {
   loadRuntimeConfig,
 } from "./config/runtime-config.js";
 import { logEffectiveOriginPolicy } from "./config/security-config.js";
+import { loadMediaDeliveryConfig } from "./config/media-delivery-config.js";
 import { loadTrtcConfig } from "./config/trtc-config.js";
 import { createFileWebAuthSessionStore } from "./web-routes.js";
 import TLSSigAPIv2 from "tls-sig-api-v2";
@@ -18,6 +19,7 @@ const {
   adminUiConfig,
 } = await loadRuntimeConfig();
 const trtcConfig = loadTrtcConfig();
+const mediaDeliveryConfig = loadMediaDeliveryConfig();
 
 assertMetricsPortDoesNotCollide(metricsPort, port, "PORT");
 logEffectiveOriginPolicy(securityConfig);
@@ -32,6 +34,7 @@ const { httpServer, metricsHttpServer } = await createSyncServer(
     metricsPort,
     webRouteDependencies: {
       authSessionStore: createFileWebAuthSessionStore(),
+      mediaDeliveryMode: mediaDeliveryConfig.mode,
       ...(trtcConfig
         ? {
             trtc: {

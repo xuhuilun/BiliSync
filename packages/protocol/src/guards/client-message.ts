@@ -35,6 +35,7 @@ import {
 const DISPLAY_NAME_MAX_LENGTH = 32;
 const TITLE_MAX_LENGTH = 128;
 const URL_MAX_LENGTH = 512;
+const PLAYBACK_SOURCE_URL_MAX_LENGTH = 4096;
 const SOURCE_REF_MAX_LENGTH = 512;
 const MIME_TYPE_MAX_LENGTH = 128;
 const LABEL_MAX_LENGTH = 32;
@@ -116,7 +117,7 @@ export function isPlaybackSourceVariant(
   return (
     isRecord(value) &&
     isPlaybackSourceKind(value.kind) &&
-    isBoundedString(value.url, URL_MAX_LENGTH) &&
+    isBoundedString(value.url, PLAYBACK_SOURCE_URL_MAX_LENGTH) &&
     (isHttpUrl(value.url) || isSameOriginWebMediaUrl(value.url)) &&
     isBoundedString(value.mimeType, MIME_TYPE_MAX_LENGTH) &&
     isOptionalBoundedString(value.label, LABEL_MAX_LENGTH)

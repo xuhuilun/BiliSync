@@ -112,7 +112,20 @@ export async function createSharedAdminHttpBootstrap(args: {
       securityPolicy,
       adminUiConfig: args.adminUiConfig,
       metricsEnabled: metricsOnMain,
-      webRouteDependencies: args.webRouteDependencies,
+      webRouteDependencies: {
+        ...args.webRouteDependencies,
+        mediaMetrics: {
+          recordManifestIssued: (mode, directCandidateCount) =>
+            args.metricsCollector.recordWebMediaManifestIssued(
+              mode,
+              directCandidateCount,
+            ),
+          recordProxyRequest: () =>
+            args.metricsCollector.recordWebMediaProxyRequest(),
+          recordProxyBytes: (bytes) =>
+            args.metricsCollector.recordWebMediaProxyBytes(bytes),
+        },
+      },
       webRoomService: {
         getRoom: (roomCode) => args.roomStore.getRoom(roomCode),
         isMemberTokenInRoom: (roomCode, memberToken) =>

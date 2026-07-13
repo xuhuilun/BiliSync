@@ -46,6 +46,9 @@ test("metrics collector renders event counters, histograms, and redis failure co
   metrics.observeRedisRoomEventBusPublishFailure();
   metrics.recordRoomEventPublishDropped("room_member_changed");
   metrics.recordRoomEventPublishDropped("room_member_changed");
+  metrics.recordWebMediaManifestIssued("direct-first", 2);
+  metrics.recordWebMediaProxyRequest();
+  metrics.recordWebMediaProxyBytes(1_024);
 
   const rendered = await metrics.render();
 
@@ -100,6 +103,24 @@ test("metrics collector renders event counters, histograms, and redis failure co
     rendered.includes(
       'bili_syncplay_room_event_publish_dropped_total{event_type="room_state_updated"} 0',
     ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_web_media_manifests_total{mode="direct-first"} 1',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes("bili_syncplay_web_media_direct_candidates_total 2"),
+    true,
+  );
+  assert.equal(
+    rendered.includes("bili_syncplay_web_media_proxy_requests_total 1"),
+    true,
+  );
+  assert.equal(
+    rendered.includes("bili_syncplay_web_media_proxy_bytes_total 1024"),
     true,
   );
 });

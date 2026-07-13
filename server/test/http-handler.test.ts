@@ -730,8 +730,12 @@ test("web bilibili auth session survives a fresh server handler through the pers
   }
 });
 
-test("web bilibili resolve accepts BV input and returns proxied playback source", async () => {
+test("web bilibili resolve returns direct, backup, and proxy playback candidates", async () => {
   const fetchCalls: string[] = [];
+  const manifestMetrics: Array<{
+    mode: string;
+    directCandidateCount: number;
+  }> = [];
   const handler = createHttpRequestHandler({
     adminRouter: {
       handle: async () => false,
@@ -754,8 +758,18 @@ test("web bilibili resolve accepts BV input and returns proxied playback source"
       },
     }),
     webRouteDependencies: {
+      mediaMetrics: {
+        recordManifestIssued: (mode, directCandidateCount) =>
+          manifestMetrics.push({ mode, directCandidateCount }),
+        recordProxyRequest: () => undefined,
+        recordProxyBytes: () => undefined,
+      },
       createToken: (() => {
-        const tokens = ["auth-token-123456", "media-token-123456"];
+        const tokens = [
+          "auth-token-123456",
+          "unauthorized-media-token",
+          "media-token-123456",
+        ];
         return () => tokens.shift() ?? "fallback-token-123";
       })(),
       fetch: async (url) => {
@@ -794,14 +808,42 @@ test("web bilibili resolve accepts BV input and returns proxied playback source"
             durl: [
               {
                 url: "https://upos.example.test/video.mp4",
+                backup_url: [
+                  "https://backup.example.test/video.mp4",
+                  "javascript:alert(1)",
+                  "https://upos.example.test/video.mp4",
+                ],
               },
             ],
           },
         });
       },
     },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async (roomCode, memberToken) =>
+        roomCode === "ABC123" && memberToken === "member-token",
+      resolveMemberIdByToken: async () => null,
+    },
   });
   await completeQrLogin(handler);
+  const unauthorizedResponse = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    unauthorizedResponse,
+  );
+  const unauthorizedPayload = JSON.parse(unauthorizedResponse.body);
+  assert.equal(unauthorizedPayload.data.playbackSource.variants.length, 1);
+  assert.match(
+    unauthorizedPayload.data.playbackSource.variants[0].url,
+    /^\/api\/web\/media\/unauthorized-media-token\/video\.mp4$/,
+  );
   const response = createResponse();
 
   await handler(
@@ -812,6 +854,8 @@ test("web bilibili resolve accepts BV input and returns proxied playback source"
       cookie: "bili_sync_auth=auth-token-123456",
       body: JSON.stringify({
         input: "BV1xx411c7mD",
+        roomCode: "ABC123",
+        memberToken: "member-token",
       }),
     }),
     response,
@@ -823,10 +867,31 @@ test("web bilibili resolve accepts BV input and returns proxied playback source"
   assert.equal(payload.data.video.sourceProvider, "authorized-bilibili");
   assert.equal(payload.data.video.videoId, "BV1xx411c7mD:456");
   assert.equal(payload.data.video.title, "Movie Night");
+  assert.deepEqual(payload.data.playbackSource.variants.slice(0, 2), [
+    {
+      kind: "mp4",
+      url: "https://upos.example.test/video.mp4",
+      mimeType: "video/mp4",
+      label: "B站 CDN",
+    },
+    {
+      kind: "mp4",
+      url: "https://backup.example.test/video.mp4",
+      mimeType: "video/mp4",
+      label: "B站备用 CDN 1",
+    },
+  ]);
   assert.match(
-    payload.data.playbackSource.variants[0].url,
+    payload.data.playbackSource.variants[2].url,
     /^\/api\/web\/media\/media-token-123456\/video\.mp4$/,
   );
+  assert.equal(payload.data.playbackSource.variants[2].label, "服务器代理");
+  assert.equal(payload.data.playbackSource.variants.length, 3);
+  assert.deepEqual(manifestMetrics, [
+    { mode: "proxy-only", directCandidateCount: 0 },
+    { mode: "direct-first", directCandidateCount: 2 },
+  ]);
+  assert.equal(response.body.includes("SESSDATA"), false);
   assert.ok(fetchCalls.some((url) => url.includes("bvid=BV1xx411c7mD")));
 });
 
@@ -956,6 +1021,7 @@ test("web bilibili resolve accepts bangumi episode links", async () => {
       },
     }),
     webRouteDependencies: {
+      mediaDeliveryMode: "proxy-only",
       createToken: (() => {
         const tokens = ["auth-token-123456", "media-token-ep"];
         return () => tokens.shift() ?? "fallback-token-123";
@@ -1270,6 +1336,8 @@ test("web bilibili media proxy streams bytes for current room members", async ()
 
 test("web bilibili media proxy forwards range requests and streams partial content", async () => {
   const mediaFetchCalls: Array<{ url: string; range?: string }> = [];
+  let proxyRequestCount = 0;
+  let proxyBytes = 0;
   const handler = createHttpRequestHandler({
     adminRouter: {
       handle: async () => false,
@@ -1292,6 +1360,15 @@ test("web bilibili media proxy forwards range requests and streams partial conte
       },
     }),
     webRouteDependencies: {
+      mediaMetrics: {
+        recordManifestIssued: () => undefined,
+        recordProxyRequest: () => {
+          proxyRequestCount += 1;
+        },
+        recordProxyBytes: (bytes) => {
+          proxyBytes += bytes;
+        },
+      },
       createToken: (() => {
         const tokens = ["auth-token-123456", "media-token-123456"];
         return () => tokens.shift() ?? "fallback-token-123";
@@ -1407,6 +1484,8 @@ test("web bilibili media proxy forwards range requests and streams partial conte
       range: "bytes=0-3",
     },
   ]);
+  assert.equal(proxyRequestCount, 1);
+  assert.equal(proxyBytes, 4);
 });
 
 test("web bilibili media proxy does not send a second response when streaming fails after headers", async () => {
