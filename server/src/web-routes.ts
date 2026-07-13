@@ -22,6 +22,7 @@ import type {
 const DIRECT_SOURCE_TTL_MS = 20 * 60 * 1000;
 const BILIBILI_AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const BILIBILI_MEDIA_TOKEN_TTL_MS = 20 * 60 * 1000;
+const DEFAULT_MEDIA_UPSTREAM_TIMEOUT_MS = 10_000;
 const BILIBILI_QR_LOGIN_TTL_MS = 180 * 1000;
 const MAX_JSON_BODY_BYTES = 16 * 1024;
 const MAX_TITLE_LENGTH = 128;
@@ -58,6 +59,7 @@ export type BilibiliFetch = (
   url: string,
   init?: {
     headers?: Record<string, string>;
+    signal?: AbortSignal;
   },
 ) => Promise<BilibiliFetchResponse>;
 
@@ -76,6 +78,7 @@ export type WebAuthSessionStore = {
 
 export type WebRouteDependencies = {
   fetch?: BilibiliFetch;
+  mediaUpstreamTimeoutMs?: number;
   createToken?: () => string;
   authSessionStore?: WebAuthSessionStore;
   mediaDeliveryMode?: BilibiliMediaDeliveryMode;
@@ -107,7 +110,8 @@ type BilibiliQrLoginSession = {
 };
 
 type BilibiliMediaToken = {
-  url: string;
+  urls: string[];
+  preferredIndex: number;
   cookie: string;
   referer: string;
   expiresAt: number;
@@ -223,7 +227,7 @@ async function handleVoiceToken(args: {
 
 function defaultFetch(
   url: string,
-  init?: { headers?: Record<string, string> },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ): Promise<BilibiliFetchResponse> {
   return fetch(url, init) as Promise<BilibiliFetchResponse>;
 }
@@ -1525,7 +1529,8 @@ async function handleVideoResolve(args: {
     const mediaToken = args.createToken();
     const expiresAt = args.now() + BILIBILI_MEDIA_TOKEN_TTL_MS;
     args.state.mediaTokens.set(mediaToken, {
-      url: mediaSources.primaryUrl,
+      urls: [mediaSources.primaryUrl, ...mediaSources.backupUrls],
+      preferredIndex: 0,
       cookie: authSession.cookie,
       referer: info.normalizedUrl,
       expiresAt,
@@ -1680,7 +1685,8 @@ async function handlePlaybackSource(args: {
     const mediaToken = args.createToken();
     const expiresAt = args.now() + BILIBILI_MEDIA_TOKEN_TTL_MS;
     args.state.mediaTokens.set(mediaToken, {
-      url: mediaSources.primaryUrl,
+      urls: [mediaSources.primaryUrl, ...mediaSources.backupUrls],
+      preferredIndex: 0,
       cookie: authSession.cookie,
       referer: info.normalizedUrl,
       expiresAt,
@@ -1723,6 +1729,7 @@ async function handleMediaProxy(args: {
   fetchImpl: BilibiliFetch;
   now: () => number;
   mediaMetrics?: WebRouteDependencies["mediaMetrics"];
+  mediaUpstreamTimeoutMs: number;
 }): Promise<void> {
   if (!args.roomService) {
     writeError(args.response, 404, "not_found", "Not found.");
@@ -1758,8 +1765,69 @@ async function handleMediaProxy(args: {
     headers.range = range;
   }
   args.mediaMetrics?.recordProxyRequest();
-  const upstream = await args.fetchImpl(token.url, { headers });
-  if (!upstream.ok) {
+  const candidateIndexes = [
+    token.preferredIndex,
+    ...token.urls
+      .map((_, index) => index)
+      .filter((index) => index !== token.preferredIndex),
+  ];
+  let upstream: BilibiliFetchResponse | undefined;
+  for (const candidateIndex of candidateIndexes) {
+    const source: WebMediaProxyUpstreamSource =
+      candidateIndex === 0 ? "primary" : "backup";
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const responseHeaderTimeout = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error("media_upstream_timeout"));
+      }, args.mediaUpstreamTimeoutMs);
+    });
+    try {
+      const candidate = await Promise.race([
+        args.fetchImpl(token.urls[candidateIndex], {
+          headers: { ...headers },
+          signal: controller.signal,
+        }),
+        responseHeaderTimeout,
+      ]);
+      if (candidate.status !== 200 && candidate.status !== 206) {
+        try {
+          void candidate.body?.cancel().catch(() => undefined);
+        } catch {
+          // Best effort: the response is already unusable for proxying.
+        }
+        args.mediaMetrics?.recordProxyUpstreamAttempt(
+          source,
+          "http_error",
+          Date.now() - startedAt,
+        );
+        continue;
+      }
+      upstream = candidate;
+      token.preferredIndex = candidateIndex;
+      args.mediaMetrics?.recordProxyUpstreamAttempt(
+        source,
+        "success",
+        Date.now() - startedAt,
+      );
+      break;
+    } catch {
+      args.mediaMetrics?.recordProxyUpstreamAttempt(
+        source,
+        timedOut ? "timeout" : "network_error",
+        Date.now() - startedAt,
+      );
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+  if (!upstream) {
     writeError(args.response, 502, "media_proxy_failed", "Media proxy failed.");
     return;
   }
@@ -1861,6 +1929,9 @@ export async function tryHandleWebRoutes(args: {
       state,
       fetchImpl,
       mediaMetrics: args.dependencies?.mediaMetrics,
+      mediaUpstreamTimeoutMs:
+        args.dependencies?.mediaUpstreamTimeoutMs ??
+        DEFAULT_MEDIA_UPSTREAM_TIMEOUT_MS,
       now,
     });
     return true;
