@@ -27,6 +27,7 @@ import {
 } from "./voice/voice-session.js";
 import {
   decidePlaybackFallback,
+  getRelevantBufferedEnd,
   isServerProxyVariant,
   MediaFallbackTimer,
 } from "./playback-source-fallback.js";
@@ -1094,9 +1095,8 @@ export default function App() {
     const markInitialized = () => timer.markMetadataLoaded();
     const markPlayable = () => timer.markPlayable();
     const markProgress = () => {
-      const { buffered } = video;
       timer.markProgress(
-        buffered.length > 0 ? buffered.end(buffered.length - 1) : Number.NaN,
+        getRelevantBufferedEnd(video.buffered, video.currentTime),
       );
     };
     video.addEventListener("loadeddata", markInitialized);

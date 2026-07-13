@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PlaybackSourceManifest } from "@bili-syncplay/protocol";
 import {
+  getRelevantBufferedEnd,
   MediaFallbackTimer,
   decidePlaybackFallback,
   isServerProxyVariant,
@@ -80,18 +81,40 @@ test("identifies only same-origin server media proxy variants", () => {
   assert.equal(isServerProxyVariant("not a valid URL", "not an origin"), false);
 });
 
+test("selects buffered end from the range relevant to current playback", () => {
+  const ranges = {
+    length: 2,
+    start: (index: number) => [0, 100][index]!,
+    end: (index: number) => [20, 120][index]!,
+  };
+  assert.equal(getRelevantBufferedEnd(ranges, 10), 20);
+  assert.equal(getRelevantBufferedEnd(ranges, 50), 120);
+  assert.equal(
+    Number.isNaN(
+      getRelevantBufferedEnd({ length: 0, start: () => 0, end: () => 0 }, 0),
+    ),
+    true,
+  );
+});
+
 test("direct metadata timeout fires after 10 seconds", (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const reasons: string[] = [];
+  let now = 0;
   const timer = new MediaFallbackTimer({
     mode: "direct",
     onFallback: (reason) => reasons.push(reason),
+    now: () => now,
   });
+  const tick = (milliseconds: number) => {
+    now += milliseconds;
+    context.mock.timers.tick(milliseconds);
+  };
 
   timer.armMetadataTimeout();
-  context.mock.timers.tick(9_999);
+  tick(9_999);
   assert.deepEqual(reasons, []);
-  context.mock.timers.tick(1);
+  tick(1);
   assert.deepEqual(reasons, ["metadata-timeout"]);
 });
 
@@ -213,6 +236,58 @@ test("proxy buffer growth resets an active stall timeout", (context) => {
   assert.deepEqual(reasons, []);
   context.mock.timers.tick(1);
   assert.deepEqual(reasons, ["stalled"]);
+});
+
+test("proxy buffer rollback does not extend metadata or reset stall timers", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const reasons: string[] = [];
+  let now = 0;
+  const timer = new MediaFallbackTimer({
+    mode: "proxy",
+    onFallback: (reason) => reasons.push(reason),
+    now: () => now,
+  });
+  const tick = (milliseconds: number) => {
+    now += milliseconds;
+    context.mock.timers.tick(milliseconds);
+  };
+
+  timer.armMetadataTimeout();
+  timer.markProgress(120);
+  timer.armStallTimeout();
+  tick(20_000);
+  timer.markProgress(10);
+  tick(10_000);
+  assert.deepEqual(reasons, ["stalled"]);
+  tick(30_000);
+  assert.deepEqual(reasons, ["stalled", "metadata-timeout"]);
+});
+
+test("proxy buffer growth after rollback extends metadata and resets stall timers", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const reasons: string[] = [];
+  let now = 0;
+  const timer = new MediaFallbackTimer({
+    mode: "proxy",
+    onFallback: (reason) => reasons.push(reason),
+    now: () => now,
+  });
+  const tick = (milliseconds: number) => {
+    now += milliseconds;
+    context.mock.timers.tick(milliseconds);
+  };
+
+  timer.armMetadataTimeout();
+  timer.markProgress(120);
+  tick(20_000);
+  timer.markProgress(10);
+  timer.armStallTimeout();
+  tick(29_000);
+  timer.markProgress(20);
+  tick(11_000);
+  assert.deepEqual(reasons, []);
+  tick(19_000);
+  assert.deepEqual(reasons, ["metadata-timeout", "stalled"]);
 });
 
 test("initialization and playback timer APIs cancel their corresponding timers", (context) => {

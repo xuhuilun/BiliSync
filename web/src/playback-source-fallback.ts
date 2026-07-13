@@ -20,6 +20,27 @@ export function isServerProxyVariant(url: string, origin: string): boolean {
   }
 }
 
+export function getRelevantBufferedEnd(
+  buffered: {
+    length: number;
+    start(index: number): number;
+    end(index: number): number;
+  },
+  currentTime: number,
+): number {
+  for (let index = 0; index < buffered.length; index += 1) {
+    const start = buffered.start(index);
+    const end = buffered.end(index);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      continue;
+    }
+    if ((currentTime >= start && currentTime <= end) || currentTime < start) {
+      return end;
+    }
+  }
+  return Number.NaN;
+}
+
 export type PlaybackFallbackDecision =
   | { kind: "refresh" }
   | { kind: "next"; variantIndex: number }
@@ -79,15 +100,16 @@ export class MediaFallbackTimer {
   }
 
   markProgress(bufferedEnd: number): void {
-    if (
-      this.mode !== "proxy" ||
-      !Number.isFinite(bufferedEnd) ||
-      (this.lastBufferedEnd !== null && bufferedEnd <= this.lastBufferedEnd)
-    ) {
+    if (this.mode !== "proxy" || !Number.isFinite(bufferedEnd)) {
       return;
     }
 
+    const previousBufferedEnd = this.lastBufferedEnd;
     this.lastBufferedEnd = bufferedEnd;
+    if (previousBufferedEnd !== null && bufferedEnd <= previousBufferedEnd) {
+      return;
+    }
+
     if (
       this.metadataTimer !== null &&
       this.metadataDeadline !== null &&
