@@ -27,6 +27,7 @@ import {
 } from "./voice/voice-session.js";
 import {
   decidePlaybackFallback,
+  isServerProxyVariant,
   MediaFallbackTimer,
 } from "./playback-source-fallback.js";
 import {
@@ -1060,8 +1061,13 @@ export default function App() {
     video.removeAttribute("src");
     video.load();
 
-    const timer = new MediaFallbackTimer((reason) => {
-      void fallbackPlaybackSource(reason);
+    const timer = new MediaFallbackTimer({
+      mode: isServerProxyVariant(activeVariant.url, window.location.origin)
+        ? "proxy"
+        : "direct",
+      onFallback: (reason) => {
+        void fallbackPlaybackSource(reason);
+      },
     });
     fallbackTimerRef.current = timer;
     timer.armMetadataTimeout();
@@ -1084,6 +1090,20 @@ export default function App() {
       }
     };
     video.addEventListener("loadedmetadata", restorePlayback);
+
+    const markInitialized = () => timer.markMetadataLoaded();
+    const markPlayable = () => timer.markPlayable();
+    const markProgress = () => {
+      const { buffered } = video;
+      timer.markProgress(
+        buffered.length > 0 ? buffered.end(buffered.length - 1) : Number.NaN,
+      );
+    };
+    video.addEventListener("loadeddata", markInitialized);
+    video.addEventListener("canplay", markInitialized);
+    video.addEventListener("playing", markPlayable);
+    video.addEventListener("canplay", markPlayable);
+    video.addEventListener("progress", markProgress);
 
     const playAfterResolve = () => {
       if (!autoplayAfterResolveRef.current) {
@@ -1130,6 +1150,11 @@ export default function App() {
       }
       video.removeEventListener("loadedmetadata", restorePlayback);
       video.removeEventListener("loadedmetadata", playAfterResolve);
+      video.removeEventListener("loadeddata", markInitialized);
+      video.removeEventListener("canplay", markInitialized);
+      video.removeEventListener("playing", markPlayable);
+      video.removeEventListener("canplay", markPlayable);
+      video.removeEventListener("progress", markProgress);
     };
   }, [activeVariant, fallbackPlaybackSource]);
 
