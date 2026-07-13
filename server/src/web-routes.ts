@@ -14,6 +14,10 @@ import {
 } from "@bili-syncplay/protocol";
 import type { PersistedRoom } from "./types.js";
 import type { BilibiliMediaDeliveryMode } from "./config/media-delivery-config.js";
+import type {
+  WebMediaProxyUpstreamResult,
+  WebMediaProxyUpstreamSource,
+} from "./admin/metrics.js";
 
 const DIRECT_SOURCE_TTL_MS = 20 * 60 * 1000;
 const BILIBILI_AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -82,6 +86,11 @@ export type WebRouteDependencies = {
     ) => void;
     recordProxyRequest: () => void;
     recordProxyBytes: (bytes: number) => void;
+    recordProxyUpstreamAttempt: (
+      source: WebMediaProxyUpstreamSource,
+      result: WebMediaProxyUpstreamResult,
+      durationMs: number,
+    ) => void;
   };
   trtc?: {
     sdkAppId: number;

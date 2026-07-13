@@ -124,6 +124,12 @@ export async function createSharedAdminHttpBootstrap(args: {
             args.metricsCollector.recordWebMediaProxyRequest(),
           recordProxyBytes: (bytes) =>
             args.metricsCollector.recordWebMediaProxyBytes(bytes),
+          recordProxyUpstreamAttempt: (source, result, durationMs) =>
+            args.metricsCollector.observeWebMediaProxyUpstreamAttempt(
+              source,
+              result,
+              durationMs,
+            ),
         },
       },
       webRoomService: {

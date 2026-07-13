@@ -763,6 +763,7 @@ test("web bilibili resolve returns direct, backup, and proxy playback candidates
           manifestMetrics.push({ mode, directCandidateCount }),
         recordProxyRequest: () => undefined,
         recordProxyBytes: () => undefined,
+        recordProxyUpstreamAttempt: () => undefined,
       },
       createToken: (() => {
         const tokens = [
@@ -1368,6 +1369,7 @@ test("web bilibili media proxy forwards range requests and streams partial conte
         recordProxyBytes: (bytes) => {
           proxyBytes += bytes;
         },
+        recordProxyUpstreamAttempt: () => undefined,
       },
       createToken: (() => {
         const tokens = ["auth-token-123456", "media-token-123456"];
