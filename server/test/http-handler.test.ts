@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Writable } from "node:stream";
 import test from "node:test";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createHttpRequestHandler } from "../src/bootstrap/http-handler.js";
 import { createSecurityPolicy } from "../src/security.js";
@@ -21,7 +27,7 @@ function createRequest(args: {
   range?: string;
   body?: string;
 }) {
-  return {
+  return Object.assign(new EventEmitter(), {
     url: args.url,
     method: args.method ?? "GET",
     headers: {
@@ -37,7 +43,7 @@ function createRequest(args: {
         yield Buffer.from(args.body);
       }
     },
-  } as IncomingMessage;
+  }) as IncomingMessage;
 }
 
 function createResponse() {
@@ -177,6 +183,197 @@ async function completeQrLogin(
     }),
     statusResponse,
   );
+}
+
+const PRIMARY_MEDIA_URL = "https://primary.example.test/video.mp4";
+const BACKUP_MEDIA_URL = "https://backup.example.test/video.mp4";
+
+type MediaAttempt = {
+  source: "primary" | "backup";
+  result: "success" | "http_error" | "network_error" | "timeout";
+};
+
+function createMediaFailoverHarness(args: {
+  mediaFetch: BilibiliFetch;
+  mediaUpstreamTimeoutMs?: number;
+}) {
+  const attempts: MediaAttempt[] = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: { handle: async () => false },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 2,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    webRouteDependencies: {
+      mediaUpstreamTimeoutMs: args.mediaUpstreamTimeoutMs,
+      mediaMetrics: {
+        recordManifestIssued: () => undefined,
+        recordProxyRequest: () => undefined,
+        recordProxyBytes: () => undefined,
+        recordProxyUpstreamAttempt: (source, result) =>
+          attempts.push({ source, result }),
+      },
+      createToken: (() => {
+        const tokens = ["auth-token-123456", "media-token-123456"];
+        return () => tokens.shift() ?? "fallback-token-123";
+      })(),
+      fetch: async (url, init) => {
+        if (url.includes("/x/passport-login/web/qrcode/generate")) {
+          return qrGenerateFetch();
+        }
+        if (url.includes("/x/passport-login/web/qrcode/poll")) {
+          return qrPollSuccessFetch();
+        }
+        if (url.includes("/x/web-interface/nav")) {
+          return jsonFetch({
+            code: 0,
+            data: { isLogin: true, uname: "Alice" },
+          });
+        }
+        if (url.includes("/x/web-interface/view")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              bvid: "BV1xx411c7mD",
+              aid: 123,
+              cid: 456,
+              title: "Movie Night",
+            },
+          });
+        }
+        if (url.includes("/x/player/playurl")) {
+          return jsonFetch({
+            code: 0,
+            data: {
+              durl: [
+                {
+                  url: PRIMARY_MEDIA_URL,
+                  backup_url: [BACKUP_MEDIA_URL],
+                },
+              ],
+            },
+          });
+        }
+        return args.mediaFetch(url, init);
+      },
+    },
+    webRoomService: {
+      getRoom: async () => null,
+      isMemberTokenInRoom: async (roomCode, memberToken) =>
+        roomCode === "ABC123" && memberToken === "member-token",
+    },
+  });
+
+  return { handler, attempts };
+}
+
+async function issueMediaToken(
+  handler: ReturnType<typeof createHttpRequestHandler>,
+): Promise<void> {
+  await completeQrLogin(handler);
+  const response = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/video/resolve",
+      method: "POST",
+      origin: "chrome-extension://allowed",
+      cookie: "bili_sync_auth=auth-token-123456",
+      body: JSON.stringify({ input: "BV1xx411c7mD" }),
+    }),
+    response,
+  );
+  assert.equal(response.statusCode, 200);
+}
+
+async function requestMedia(
+  handler: ReturnType<typeof createHttpRequestHandler>,
+  range = "bytes=0-3",
+) {
+  const response = createResponse();
+  await handler(
+    createRequest({
+      url: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+      origin: "chrome-extension://allowed",
+      range,
+    }),
+    response,
+  );
+  return response;
+}
+
+function mediaResponse(args: {
+  status: number;
+  body?: ReadableStream<Uint8Array>;
+  content?: string;
+}): Awaited<ReturnType<BilibiliFetch>> {
+  const content = Buffer.from(args.content ?? "part");
+  return {
+    ok: args.status >= 200 && args.status < 300,
+    status: args.status,
+    body:
+      args.body ??
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(content);
+          controller.close();
+        },
+      }),
+    headers: {
+      get: (name: string) => {
+        switch (name.toLowerCase()) {
+          case "content-type":
+            return "video/mp4";
+          case "content-length":
+            return String(content.byteLength);
+          case "content-range":
+            return args.status === 206 ? "bytes 0-3/100" : null;
+          case "accept-ranges":
+            return "bytes";
+          default:
+            return null;
+        }
+      },
+    },
+    json: async () => ({}),
+    arrayBuffer: async () =>
+      content.buffer.slice(
+        content.byteOffset,
+        content.byteOffset + content.byteLength,
+      ),
+  };
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function createHandler(adminHandled = false) {
@@ -763,6 +960,7 @@ test("web bilibili resolve returns direct, backup, and proxy playback candidates
           manifestMetrics.push({ mode, directCandidateCount }),
         recordProxyRequest: () => undefined,
         recordProxyBytes: () => undefined,
+        recordProxyUpstreamAttempt: () => undefined,
       },
       createToken: (() => {
         const tokens = [
@@ -1368,6 +1566,7 @@ test("web bilibili media proxy forwards range requests and streams partial conte
         recordProxyBytes: (bytes) => {
           proxyBytes += bytes;
         },
+        recordProxyUpstreamAttempt: () => undefined,
       },
       createToken: (() => {
         const tokens = ["auth-token-123456", "media-token-123456"];
@@ -1486,6 +1685,291 @@ test("web bilibili media proxy forwards range requests and streams partial conte
   ]);
   assert.equal(proxyRequestCount, 1);
   assert.equal(proxyBytes, 4);
+});
+
+test("web bilibili media proxy fails over from an HTTP error and preserves Range", async () => {
+  const calls: Array<{ url: string; range?: string }> = [];
+  let failedBodyCancelled = false;
+  const failedBody = new ReadableStream<Uint8Array>({
+    cancel() {
+      failedBodyCancelled = true;
+      return new Promise(() => undefined);
+    },
+  });
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaFetch: async (url, init) => {
+      calls.push({ url, range: init?.headers?.range });
+      return url === PRIMARY_MEDIA_URL
+        ? mediaResponse({ status: 502, body: failedBody })
+        : mediaResponse({ status: 206 });
+    },
+  });
+  await issueMediaToken(handler);
+
+  const response = await requestMedia(handler, "bytes=0-3");
+
+  assert.equal(response.statusCode, 206);
+  assert.equal(response.headers["content-range"], "bytes 0-3/100");
+  assert.equal(response.headers["content-length"], "4");
+  assert.equal(response.body, "part");
+  assert.deepEqual(calls, [
+    { url: PRIMARY_MEDIA_URL, range: "bytes=0-3" },
+    { url: BACKUP_MEDIA_URL, range: "bytes=0-3" },
+  ]);
+  assert.equal(failedBodyCancelled, true);
+  assert.deepEqual(attempts, [
+    { source: "primary", result: "http_error" },
+    { source: "backup", result: "success" },
+  ]);
+});
+
+test("web bilibili media proxy fails over from a network error", async () => {
+  const calls: string[] = [];
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaFetch: async (url) => {
+      calls.push(url);
+      if (url === PRIMARY_MEDIA_URL) {
+        throw new Error("connection failed");
+      }
+      return mediaResponse({ status: 200, content: "backup" });
+    },
+  });
+  await issueMediaToken(handler);
+
+  const response = await requestMedia(handler);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body, "backup");
+  assert.deepEqual(calls, [PRIMARY_MEDIA_URL, BACKUP_MEDIA_URL]);
+  assert.deepEqual(attempts, [
+    { source: "primary", result: "network_error" },
+    { source: "backup", result: "success" },
+  ]);
+});
+
+test("web bilibili media proxy times out one upstream before trying the next", async () => {
+  const calls: string[] = [];
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaUpstreamTimeoutMs: 1,
+    mediaFetch: async (url) => {
+      calls.push(url);
+      if (url === BACKUP_MEDIA_URL) {
+        return mediaResponse({ status: 200, content: "backup" });
+      }
+      return new Promise(() => undefined);
+    },
+  });
+  await issueMediaToken(handler);
+
+  const response = await requestMedia(handler);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body, "backup");
+  assert.deepEqual(calls, [PRIMARY_MEDIA_URL, BACKUP_MEDIA_URL]);
+  assert.deepEqual(attempts, [
+    { source: "primary", result: "timeout" },
+    { source: "backup", result: "success" },
+  ]);
+});
+
+test("web bilibili media proxy returns a generic error after cancelling every failed body", async () => {
+  const cancelled: string[] = [];
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaFetch: async (url) =>
+      mediaResponse({
+        status: 503,
+        body: new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled.push(url);
+          },
+        }),
+      }),
+  });
+  await issueMediaToken(handler);
+
+  const response = await requestMedia(handler);
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: false,
+    error: {
+      code: "media_proxy_failed",
+      message: "Media proxy failed.",
+    },
+  });
+  assert.deepEqual(cancelled, [PRIMARY_MEDIA_URL, BACKUP_MEDIA_URL]);
+  assert.deepEqual(attempts, [
+    { source: "primary", result: "http_error" },
+    { source: "backup", result: "http_error" },
+  ]);
+  assert.equal(response.body.includes("503"), false);
+  assert.equal(response.body.includes("example.test"), false);
+});
+
+test("web bilibili media proxy remembers the successful backup for the next Range", async () => {
+  const calls: Array<{ url: string; range?: string }> = [];
+  let primaryCalls = 0;
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaFetch: async (url, init) => {
+      calls.push({ url, range: init?.headers?.range });
+      if (url === PRIMARY_MEDIA_URL && primaryCalls++ === 0) {
+        return mediaResponse({ status: 502 });
+      }
+      return mediaResponse({ status: 206 });
+    },
+  });
+  await issueMediaToken(handler);
+
+  await requestMedia(handler, "bytes=0-3");
+  await requestMedia(handler, "bytes=4-7");
+
+  assert.deepEqual(calls, [
+    { url: PRIMARY_MEDIA_URL, range: "bytes=0-3" },
+    { url: BACKUP_MEDIA_URL, range: "bytes=0-3" },
+    { url: BACKUP_MEDIA_URL, range: "bytes=4-7" },
+  ]);
+  assert.deepEqual(attempts, [
+    { source: "primary", result: "http_error" },
+    { source: "backup", result: "success" },
+    { source: "backup", result: "success" },
+  ]);
+});
+
+test("web bilibili media proxy aborts the pending upstream when the client disconnects before headers", async () => {
+  let releaseUpstreamStarted: (() => void) | undefined;
+  const upstreamStarted = new Promise<void>((resolve) => {
+    releaseUpstreamStarted = resolve;
+  });
+  let releaseUpstreamAborted: (() => void) | undefined;
+  const upstreamAborted = new Promise<void>((resolve) => {
+    releaseUpstreamAborted = resolve;
+  });
+  let backupCalls = 0;
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaUpstreamTimeoutMs: 200,
+    mediaFetch: async (url, init) => {
+      if (url === BACKUP_MEDIA_URL) {
+        backupCalls += 1;
+        return mediaResponse({ status: 200 });
+      }
+      releaseUpstreamStarted?.();
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            releaseUpstreamAborted?.();
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
+      });
+    },
+  });
+  await issueMediaToken(handler);
+  let releaseHandlerFinished: (() => void) | undefined;
+  const handlerFinished = new Promise<void>((resolve) => {
+    releaseHandlerFinished = resolve;
+  });
+  let handledRequest: IncomingMessage | undefined;
+  let handledResponse: ServerResponse | undefined;
+  const server = createServer((request, response) => {
+    handledRequest = request;
+    handledResponse = response;
+    void handler(request, response).finally(() => releaseHandlerFinished?.());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const startedAt = Date.now();
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port: address.port,
+      path: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+      headers: { origin: "chrome-extension://allowed" },
+    });
+    request.on("error", () => undefined);
+    request.end();
+    await upstreamStarted;
+    request.destroy();
+
+    await withTimeout(
+      Promise.all([upstreamAborted, handlerFinished]),
+      100,
+      "client abort was not propagated promptly",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
+  assert.equal(backupCalls, 0);
+  assert.deepEqual(attempts, []);
+  assert.ok(Date.now() - startedAt < 150);
+  assert.equal(handledRequest?.listenerCount("aborted"), 0);
+  assert.equal(handledResponse?.listenerCount("close"), 0);
+});
+
+test("web bilibili media proxy cancels the upstream Web Stream when the client aborts", async () => {
+  let releaseCancelled: (() => void) | undefined;
+  const cancelled = new Promise<void>((resolve) => {
+    releaseCancelled = resolve;
+  });
+  const { handler } = createMediaFailoverHarness({
+    mediaFetch: async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Buffer.from("first"));
+        },
+        cancel() {
+          releaseCancelled?.();
+        },
+      }),
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "content-type" ? "video/mp4" : null,
+      },
+      json: async () => ({}),
+      arrayBuffer: async () => Buffer.from("first").buffer,
+    }),
+  });
+  await issueMediaToken(handler);
+  const server = createServer((request, response) => {
+    void handler(request, response);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+          headers: { origin: "chrome-extension://allowed" },
+        },
+        (response) => {
+          response.once("data", () => {
+            response.destroy();
+            resolve();
+          });
+        },
+      );
+      request.once("error", reject);
+      request.end();
+    });
+    await withTimeout(cancelled, 500, "upstream body was not cancelled");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
 });
 
 test("web bilibili media proxy does not send a second response when streaming fails after headers", async () => {

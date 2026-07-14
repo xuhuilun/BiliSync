@@ -125,6 +125,62 @@ test("metrics collector renders event counters, histograms, and redis failure co
   );
 });
 
+test("metrics collector counts primary upstream HTTP errors", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    } as never,
+  });
+
+  metrics.observeWebMediaProxyUpstreamAttempt("primary", "http_error", 100);
+
+  const rendered = await metrics.render();
+
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_web_media_proxy_upstream_attempts_total{result="http_error",source="primary"} 1',
+    ),
+    true,
+  );
+});
+
+test("metrics collector observes backup upstream success duration", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    } as never,
+  });
+
+  metrics.observeWebMediaProxyUpstreamAttempt("backup", "success", 500);
+
+  const rendered = await metrics.render();
+
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_web_media_proxy_upstream_duration_seconds_bucket{le="0.5",result="success",source="backup"} 1',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_web_media_proxy_upstream_duration_seconds_count{result="success",source="backup"} 1',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_web_media_proxy_upstream_duration_seconds_sum{result="success",source="backup"} 0.5',
+    ),
+    true,
+  );
+});
+
 test("metrics collector can rebind to the effective runtime store", async () => {
   const localRuntimeStore = createInMemoryRuntimeStore(() => 0);
   const sharedRuntimeStore = createInMemoryRuntimeStore(() => 0);

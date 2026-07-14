@@ -16,6 +16,10 @@ const CORE_EVENT_NAMES = [
 export type MonitoredMessageType =
   "video:share" | "playback:update" | "room:join" | "room:leave";
 
+export type WebMediaProxyUpstreamSource = "primary" | "backup";
+export type WebMediaProxyUpstreamResult =
+  "success" | "http_error" | "network_error" | "timeout";
+
 type LabelValues = Record<string, string>;
 
 type HistogramSample = {
@@ -62,6 +66,11 @@ export type MetricsCollector = {
   ) => void;
   recordWebMediaProxyRequest: () => void;
   recordWebMediaProxyBytes: (bytes: number) => void;
+  observeWebMediaProxyUpstreamAttempt: (
+    source: WebMediaProxyUpstreamSource,
+    result: WebMediaProxyUpstreamResult,
+    durationMs: number,
+  ) => void;
   render: () => Promise<string>;
 };
 
@@ -158,6 +167,10 @@ export function createMetricsCollector(options: {
     help: "Total Bilibili playback manifests issued by delivery mode",
     samples: new Map(),
   };
+  const webMediaProxyUpstreamAttemptCounter: CounterMetric = {
+    help: "Total Bilibili media proxy upstream attempts by source and result",
+    samples: new Map(),
+  };
   let webMediaDirectCandidateCount = 0;
   let webMediaProxyRequestCount = 0;
   let webMediaProxyBytes = 0;
@@ -173,6 +186,11 @@ export function createMetricsCollector(options: {
   };
   const redisRoomEventBusPublishDurationHistogram: HistogramMetric = {
     help: "Duration of Redis room event bus publish operations in seconds",
+    buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
+    samples: new Map(),
+  };
+  const webMediaProxyUpstreamDurationHistogram: HistogramMetric = {
+    help: "Duration of Bilibili media proxy upstream attempts in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
     samples: new Map(),
   };
@@ -246,6 +264,10 @@ export function createMetricsCollector(options: {
       {
         name: "bili_syncplay_redis_room_event_bus_publish_duration_seconds",
         metric: redisRoomEventBusPublishDurationHistogram,
+      },
+      {
+        name: "bili_syncplay_web_media_proxy_upstream_duration_seconds",
+        metric: webMediaProxyUpstreamDurationHistogram,
       },
     ] as const;
 
@@ -349,6 +371,21 @@ export function createMetricsCollector(options: {
         "bili_syncplay_web_media_proxy_bytes_total",
         webMediaProxyBytes,
       ),
+      "# HELP bili_syncplay_web_media_proxy_upstream_attempts_total Total Bilibili media proxy upstream attempts by source and result",
+      "# TYPE bili_syncplay_web_media_proxy_upstream_attempts_total counter",
+      ...Array.from(webMediaProxyUpstreamAttemptCounter.samples.values())
+        .sort((left, right) =>
+          createLabelKey(left.labels).localeCompare(
+            createLabelKey(right.labels),
+          ),
+        )
+        .map((sample) =>
+          formatMetricLine(
+            "bili_syncplay_web_media_proxy_upstream_attempts_total",
+            sample.value,
+            sample.labels,
+          ),
+        ),
     ];
 
     for (const { name, metric } of histogramMetrics) {
@@ -442,6 +479,15 @@ export function createMetricsCollector(options: {
       if (Number.isFinite(bytes) && bytes > 0) {
         webMediaProxyBytes += bytes;
       }
+    },
+    observeWebMediaProxyUpstreamAttempt(source, result, durationMs) {
+      const labels = { source, result };
+      incrementCounter(webMediaProxyUpstreamAttemptCounter, labels);
+      observeHistogram(
+        webMediaProxyUpstreamDurationHistogram,
+        labels,
+        durationMs,
+      );
     },
     render,
   };

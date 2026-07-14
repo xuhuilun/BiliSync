@@ -12,6 +12,7 @@ release/
 !/.claude/agents/
 !/.claude/commands/
 .codex/
+.worktrees/
 .tmp/
 .bili-syncplay/
 
