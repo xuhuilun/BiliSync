@@ -19,6 +19,21 @@ See [Tencent Cloud TRTC Web voice setup](../voice-trtc-setup.md).
   final fallback. `proxy-only` is the emergency rollback mode and returns only
   the server proxy URL. Bilibili cookies remain server-side in both modes.
 
+## Cached video library
+
+- `CACHED_VIDEO_DIR`: optional absolute path to the local ECS video directory,
+  for example `/opt/bilisync/media`. The cached-video library is disabled when
+  unset. Only completed `.mp4` files are scanned; active downloads should use a
+  `.part` or `.tmp` suffix.
+- `CACHED_VIDEO_SCAN_INTERVAL_MS`: directory rescan interval in milliseconds;
+  defaults to `30000` and accepts `5000` through `3600000`. The Nginx
+  `/_cached-media/` alias must point to the same directory as
+  `CACHED_VIDEO_DIR`.
+
+Nginx sends video bytes through `X-Accel-Redirect` with Range support; Node does
+not proxy the file body. Use H.264/AAC MP4 and prepare files with
+`ffmpeg -c copy -movflags +faststart` before publishing them.
+
 ## Basic Service
 
 - `BILI_SYNCPLAY_CONFIG`: optional path to a JSON config file; when unset, the server looks for `server.config.json` in the current working directory

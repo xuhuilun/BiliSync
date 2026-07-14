@@ -127,6 +127,7 @@ label {
 }
 
 .side-panel {
+  min-width: 0;
   border-radius: 28px;
   padding: 22px;
   display: flex;
@@ -529,7 +530,7 @@ h3 {
   border-radius: 32px;
   padding: 24px;
   display: grid;
-  grid-template-rows: auto minmax(320px, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -537,6 +538,58 @@ h3 {
 .now-bar {
   justify-content: space-between;
   gap: 16px;
+}
+
+.stage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.workspace-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.workspace-tabs button {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  white-space: nowrap;
+}
+
+.workspace-tabs button:hover {
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: none;
+}
+
+.workspace-tabs button.is-active {
+  background: #ffffff;
+  color: var(--blue);
+  box-shadow: 0 1px 3px rgba(60, 64, 67, 0.18);
+}
+
+.player-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(320px, 1fr) auto auto auto;
+  gap: 18px;
+}
+
+.player-workspace[hidden],
+.library-workspace[hidden] {
+  display: none;
 }
 
 .video-frame {
@@ -650,6 +703,118 @@ h3 {
   font-size: 13px;
 }
 
+.library-workspace {
+  min-height: 420px;
+  align-content: start;
+  display: grid;
+  gap: 16px;
+}
+
+.library-toolbar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+.library-toolbar p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.library-empty {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  border-block: 1px dashed var(--line);
+  color: var(--muted);
+}
+
+.library-empty strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.library-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.library-error button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  color: var(--red);
+  border-color: #f4c7c3;
+}
+
+.cached-video-list {
+  display: grid;
+  gap: 8px;
+}
+
+.cached-video-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.cached-video-row:hover {
+  border-color: #c4c7c5;
+  box-shadow: 0 3px 12px rgba(60, 64, 67, 0.1);
+}
+
+.cached-video-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #e6f4ea;
+  color: var(--green);
+}
+
+.cached-video-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.cached-video-copy h3 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.cached-video-copy p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cached-video-play {
+  min-width: 166px;
+  border-radius: 8px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -734,7 +899,11 @@ h3 {
   }
 
   .watch-stage {
-    grid-template-rows: auto auto auto auto auto;
+    grid-template-rows: auto auto;
+  }
+
+  .player-workspace {
+    grid-template-rows: auto auto auto auto;
   }
 
   .video-frame,
@@ -754,6 +923,32 @@ h3 {
   .now-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .stage-actions {
+    justify-content: stretch;
+  }
+
+  .workspace-tabs {
+    width: 100%;
+  }
+
+  .workspace-tabs button {
+    padding-inline: 8px;
+    font-size: 13px;
+  }
+
+  .stage-actions > button {
+    width: 100%;
+  }
+
+  .cached-video-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .cached-video-play {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .brand-row {

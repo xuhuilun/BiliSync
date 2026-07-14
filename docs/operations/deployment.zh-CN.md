@@ -414,6 +414,41 @@ server {
 - 全局管理面建议继续收敛到独立的 `global-admin` 进程
 - 当所有 Redis 共享能力都已开启时，正确性上不再依赖 sticky 路由；但上线初期仍可保留 sticky 作为运维兜底开关
 
+### 启用已缓存视频库
+
+如果项目已经在线运行，请优先按照[缓存视频功能增量部署手册](./cached-video-library-deployment.zh-CN.md)操作；该手册包含现有服务识别、上线顺序、回滚和故障排查。
+
+创建与 `deploy/nginx.conf` 中 `/_cached-media/` `alias` 一致的目录，并确保
+Room Node 服务用户可读：
+
+```bash
+sudo install -d -o bili-syncplay -g bili-syncplay -m 0755 /opt/bilisync/media
+```
+
+在 Room Node 的 systemd `[Service]` 中增加：
+
+```ini
+Environment=CACHED_VIDEO_DIR=/opt/bilisync/media
+Environment=CACHED_VIDEO_SCAN_INTERVAL_MS=30000
+```
+
+下载过程使用临时后缀，完成并处理 faststart 后再原子改名，避免网页扫描到半成品：
+
+```bash
+# 下载到 movie.source.mp4.part 后，生成浏览器可快速起播的最终文件
+ffmpeg -i movie.source.mp4.part -c copy -movflags +faststart movie.ready.mp4
+mv movie.ready.mp4 /opt/bilisync/media/movie.mp4
+```
+
+若源视频不是 H.264 视频和 AAC 音频，需要先离线转码。修改 systemd 和 Nginx
+后执行 `sudo systemctl daemon-reload`、重启 Room Node，再运行 `sudo nginx -t`
+并重载 Nginx。可用以下命令验证列表和 Range 播放：
+
+```bash
+curl -s https://sync.example.com/api/web/cached-videos
+curl -I -H 'Range: bytes=0-1023' https://sync.example.com/api/web/cached-videos/<video-id>/video.mp4
+```
+
 启用站点并校验配置：
 
 ```bash

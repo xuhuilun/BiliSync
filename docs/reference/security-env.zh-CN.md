@@ -11,6 +11,18 @@
   回退线路；`proxy-only` 是紧急回滚模式，只返回服务器代理。两种模式都不会
   把 B站 Cookie 下发到浏览器。
 
+## 已缓存视频库
+
+- `CACHED_VIDEO_DIR`：可选的 ECS 本地视频绝对目录，例如
+  `/opt/bilisync/media`。未设置时“已缓存视频”功能关闭。服务只扫描其中已完成的
+  `.mp4` 文件；下载中的文件应使用 `.part` 或 `.tmp` 后缀。
+- `CACHED_VIDEO_SCAN_INTERVAL_MS`：重新扫描目录的间隔，默认 `30000`
+  毫秒，允许 `5000` 到 `3600000`。Nginx 的 `/_cached-media/` `alias`
+  必须指向与 `CACHED_VIDEO_DIR` 相同的目录。
+
+视频由 Nginx 通过 `X-Accel-Redirect` 和 Range 请求发送，Node 不转发文件内容。
+推荐使用 H.264/AAC MP4，并在上线前执行 `ffmpeg -c copy -movflags +faststart`。
+
 ## 基础服务
 
 - `BILI_SYNCPLAY_CONFIG`：可选的 JSON 配置文件路径；未设置时会优先查找当前工作目录下的 `server.config.json`

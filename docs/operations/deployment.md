@@ -414,6 +414,40 @@ In this topology:
 - the recommended production setup still keeps `/admin` and `/api/admin/*` on a dedicated `global-admin` process
 - when all Redis-backed sharing is enabled, room-state correctness no longer depends on sticky routing, though keeping a sticky fallback during initial rollout can still be useful operationally
 
+### Enable the cached video library
+
+Create the directory used by the `/_cached-media/` alias in
+`deploy/nginx.conf`, and make it readable by the Room Node service account:
+
+```bash
+sudo install -d -o bili-syncplay -g bili-syncplay -m 0755 /opt/bilisync/media
+```
+
+Add these entries to the Room Node systemd `[Service]` section:
+
+```ini
+Environment=CACHED_VIDEO_DIR=/opt/bilisync/media
+Environment=CACHED_VIDEO_SCAN_INTERVAL_MS=30000
+```
+
+Use a temporary suffix while downloading. Prepare faststart and atomically
+rename the completed file so the scanner never publishes a partial video:
+
+```bash
+# After downloading to movie.source.mp4.part, produce the browser-ready file
+ffmpeg -i movie.source.mp4.part -c copy -movflags +faststart movie.ready.mp4
+mv movie.ready.mp4 /opt/bilisync/media/movie.mp4
+```
+
+Transcode offline first when the source is not H.264 video with AAC audio.
+After changing systemd and Nginx, run `sudo systemctl daemon-reload`, restart the
+Room Node, then validate and reload Nginx. Verify the list and Range playback:
+
+```bash
+curl -s https://sync.example.com/api/web/cached-videos
+curl -I -H 'Range: bytes=0-1023' https://sync.example.com/api/web/cached-videos/<video-id>/video.mp4
+```
+
 Enable the site and validate config:
 
 ```bash

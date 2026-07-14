@@ -18,6 +18,7 @@ import type {
   WebMediaProxyUpstreamResult,
   WebMediaProxyUpstreamSource,
 } from "./admin/metrics.js";
+import type { CachedVideoCatalog } from "./cached-videos/catalog.js";
 
 const DIRECT_SOURCE_TTL_MS = 20 * 60 * 1000;
 const BILIBILI_AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -82,6 +83,7 @@ export type WebRouteDependencies = {
   mediaUpstreamTimeoutMs?: number;
   createToken?: () => string;
   authSessionStore?: WebAuthSessionStore;
+  cachedVideoCatalog?: CachedVideoCatalog;
   mediaDeliveryMode?: BilibiliMediaDeliveryMode;
   mediaMetrics?: {
     recordManifestIssued: (
@@ -344,6 +346,70 @@ function writeError(
       message,
     },
   });
+}
+
+function createCachedVideoInternalUri(relativePath: string): string | null {
+  const segments = relativePath.split(/[\\/]+/);
+  if (
+    segments.length === 0 ||
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        Array.from(segment).some((character) => {
+          const codePoint = character.codePointAt(0) ?? 0;
+          return codePoint <= 31 || codePoint === 127;
+        }),
+    )
+  ) {
+    return null;
+  }
+  return `/_cached-media/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+function handleCachedVideoList(args: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  catalog?: CachedVideoCatalog;
+}): void {
+  if (args.request.method !== "GET") {
+    writeError(args.response, 405, "method_not_allowed", "Method not allowed.");
+    return;
+  }
+  writeJson(args.response, 200, {
+    ok: true,
+    data: {
+      enabled: args.catalog?.enabled ?? false,
+      videos: args.catalog?.list() ?? [],
+    },
+  });
+}
+
+function handleCachedVideoPlayback(args: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  videoId: string;
+  catalog?: CachedVideoCatalog;
+}): void {
+  if (args.request.method !== "GET" && args.request.method !== "HEAD") {
+    writeError(args.response, 405, "method_not_allowed", "Method not allowed.");
+    return;
+  }
+  const entry = args.catalog?.find(args.videoId);
+  const internalUri = entry
+    ? createCachedVideoInternalUri(entry.relativePath)
+    : null;
+  if (!entry || !internalUri) {
+    writeError(args.response, 404, "not_found", "Not found.");
+    return;
+  }
+  args.response.writeHead(200, {
+    "content-type": "video/mp4",
+    "cache-control": "private, max-age=3600",
+    "x-accel-redirect": internalUri,
+  });
+  args.response.end();
 }
 
 function writeBuffer(
@@ -1902,6 +1968,28 @@ export async function tryHandleWebRoutes(args: {
   const fetchImpl = args.dependencies?.fetch ?? defaultFetch;
   const createToken = args.dependencies?.createToken ?? defaultCreateToken;
   const now = args.now ?? Date.now;
+
+  if (args.pathname === "/api/web/cached-videos") {
+    handleCachedVideoList({
+      request: args.request,
+      response: args.response,
+      catalog: args.dependencies?.cachedVideoCatalog,
+    });
+    return true;
+  }
+
+  const cachedVideoMatch = args.pathname.match(
+    /^\/api\/web\/cached-videos\/([A-Za-z0-9_-]{3,64})\/video\.mp4$/,
+  );
+  if (cachedVideoMatch) {
+    handleCachedVideoPlayback({
+      request: args.request,
+      response: args.response,
+      videoId: cachedVideoMatch[1],
+      catalog: args.dependencies?.cachedVideoCatalog,
+    });
+    return true;
+  }
 
   if (args.pathname === "/api/web/voice/token") {
     await handleVoiceToken({

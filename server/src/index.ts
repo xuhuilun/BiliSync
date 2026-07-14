@@ -7,6 +7,8 @@ import { logEffectiveOriginPolicy } from "./config/security-config.js";
 import { loadMediaDeliveryConfig } from "./config/media-delivery-config.js";
 import { loadTrtcConfig } from "./config/trtc-config.js";
 import { createFileWebAuthSessionStore } from "./web-routes.js";
+import { loadCachedVideoConfig } from "./config/cached-video-config.js";
+import { createCachedVideoCatalog } from "./cached-videos/catalog.js";
 import TLSSigAPIv2 from "tls-sig-api-v2";
 
 const {
@@ -20,6 +22,17 @@ const {
 } = await loadRuntimeConfig();
 const trtcConfig = loadTrtcConfig();
 const mediaDeliveryConfig = loadMediaDeliveryConfig();
+const cachedVideoConfig = loadCachedVideoConfig();
+const cachedVideoCatalog = createCachedVideoCatalog({
+  ...cachedVideoConfig,
+  onError: (error) => {
+    console.error(
+      "Cached video directory scan failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  },
+});
+cachedVideoCatalog.start();
 
 assertMetricsPortDoesNotCollide(metricsPort, port, "PORT");
 logEffectiveOriginPolicy(securityConfig);
@@ -34,6 +47,7 @@ const { httpServer, metricsHttpServer } = await createSyncServer(
     metricsPort,
     webRouteDependencies: {
       authSessionStore: createFileWebAuthSessionStore(),
+      cachedVideoCatalog,
       mediaDeliveryMode: mediaDeliveryConfig.mode,
       ...(trtcConfig
         ? {

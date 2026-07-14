@@ -4,6 +4,7 @@ import { QRCodeSVG } from "qrcode.react";
 import {
   Copy,
   Film,
+  HardDrive,
   Link2,
   LoaderCircle,
   LogOut,
@@ -17,6 +18,13 @@ import {
   Users,
   X,
 } from "lucide-react";
+import {
+  createCachedVideoPlaybackUrl,
+  getInitialWorkspaceView,
+  readCachedVideoListResponse,
+  shouldResolvePendingCachedVideo,
+  type CachedVideoSummary,
+} from "./cached-video-library.js";
 import { createTrtcVoiceAdapter } from "./voice/trtc-adapter.js";
 import { createTrtcUserId } from "./voice/member-identity.js";
 import { VoiceDuckingController } from "./voice/voice-ducking.js";
@@ -44,6 +52,7 @@ import {
 } from "@bili-syncplay/protocol";
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "closed";
+type WorkspaceView = "player" | "library";
 type QrLoginStatus =
   | "idle"
   | "loading"
@@ -173,6 +182,22 @@ function formatTime(seconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function formatUpdatedAt(timestamp: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
 function isDirectMediaInput(input: string): boolean {
   try {
     const url = new URL(input);
@@ -247,8 +272,20 @@ function qrMessage(status: QrLoginStatus): string {
 
 export default function App() {
   const initialInvite = useMemo(parseInviteFromLocation, []);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(() =>
+    getInitialWorkspaceView(initialInvite.roomCode, initialInvite.joinToken),
+  );
   const [videoInput, setVideoInput] = useState("");
   const [isResolvingVideo, setIsResolvingVideo] = useState(false);
+  const [cachedVideos, setCachedVideos] = useState<CachedVideoSummary[]>([]);
+  const [cachedVideosEnabled, setCachedVideosEnabled] = useState(true);
+  const [cachedVideosLoading, setCachedVideosLoading] = useState(true);
+  const [cachedVideosError, setCachedVideosError] = useState<string | null>(
+    null,
+  );
+  const [creatingCachedVideoId, setCreatingCachedVideoId] = useState<
+    string | null
+  >(null);
   const [authProfile, setAuthProfile] = useState<AuthProfile>({
     loggedIn: false,
   });
@@ -292,6 +329,11 @@ export default function App() {
   const suppressLocalPlaybackEventsUntilRef = useRef(0);
   const autoplayAfterResolveRef = useRef(false);
   const pendingJoinTokenRef = useRef("");
+  const pendingCachedVideoRef = useRef<{
+    video: CachedVideoSummary;
+    previousMemberToken: string | null;
+  } | null>(null);
+  const pendingCachedRoomTimeoutRef = useRef<number | null>(null);
   const avatarCloseTimerRef = useRef<number | null>(null);
   const sequenceRef = useRef(1);
   const voiceControllerRef = useRef<VoiceSessionController | null>(null);
@@ -304,6 +346,44 @@ export default function App() {
     playbackRate: number;
     shouldPlay: boolean;
   } | null>(null);
+
+  const loadCachedVideos = useCallback(async () => {
+    setCachedVideosLoading(true);
+    try {
+      const response = await fetch("/api/web/cached-videos", {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error("cached_video_list_failed");
+      }
+      const library = readCachedVideoListResponse(await response.json());
+      setCachedVideos(library.videos);
+      setCachedVideosEnabled(library.enabled);
+      setCachedVideosError(null);
+    } catch {
+      setCachedVideosError("无法读取已缓存视频，请稍后刷新");
+    } finally {
+      setCachedVideosLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCachedVideos();
+    const timer = window.setInterval(() => {
+      void loadCachedVideos();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [loadCachedVideos]);
+
+  useEffect(
+    () => () => {
+      if (pendingCachedRoomTimeoutRef.current !== null) {
+        window.clearTimeout(pendingCachedRoomTimeoutRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     sessionRef.current = session;
@@ -678,64 +758,81 @@ export default function App() {
     }
   }, [leaveVoice, session]);
 
-  const handleServerMessage = useCallback((message: ServerMessage) => {
-    switch (message.type) {
-      case "room:created": {
-        setSession({
-          roomCode: message.payload.roomCode,
-          memberId: message.payload.memberId,
-          memberToken: message.payload.memberToken,
-          joinToken: message.payload.joinToken,
-        });
-        setNotice("情侣房间已创建");
-        return;
-      }
-      case "room:joined": {
-        const joinToken =
-          sessionRef.current?.joinToken ?? pendingJoinTokenRef.current;
-        setSession({
-          roomCode: message.payload.roomCode,
-          memberId: message.payload.memberId,
-          memberToken: message.payload.memberToken,
-          joinToken,
-        });
-        setNotice("已加入情侣房间");
-        return;
-      }
-      case "room:state": {
-        setRoomState(message.payload);
-        setError(null);
-        return;
-      }
-      case "room:member-joined":
-      case "room:member-left": {
-        const member = message.payload.member;
-        setRoomState((current) => {
-          if (!current || current.roomCode !== message.payload.roomCode) {
-            return current;
-          }
-          if (message.type === "room:member-joined") {
-            const members = current.members.some(
-              (item) => item.id === member.id,
-            )
-              ? current.members
-              : [...current.members, member];
-            return { ...current, members };
-          }
-          return {
-            ...current,
-            members: current.members.filter((item) => item.id !== member.id),
-          };
-        });
-        return;
-      }
-      case "error":
-        setError(message.payload.message);
-        return;
-      case "sync:pong":
-        return;
+  const failPendingCachedVideo = useCallback((message: string) => {
+    if (!pendingCachedVideoRef.current) {
+      return;
     }
+    pendingCachedVideoRef.current = null;
+    if (pendingCachedRoomTimeoutRef.current !== null) {
+      window.clearTimeout(pendingCachedRoomTimeoutRef.current);
+      pendingCachedRoomTimeoutRef.current = null;
+    }
+    setCreatingCachedVideoId(null);
+    setCachedVideosError(message);
   }, []);
+
+  const handleServerMessage = useCallback(
+    (message: ServerMessage) => {
+      switch (message.type) {
+        case "room:created": {
+          setSession({
+            roomCode: message.payload.roomCode,
+            memberId: message.payload.memberId,
+            memberToken: message.payload.memberToken,
+            joinToken: message.payload.joinToken,
+          });
+          setNotice("情侣房间已创建");
+          return;
+        }
+        case "room:joined": {
+          const joinToken =
+            sessionRef.current?.joinToken ?? pendingJoinTokenRef.current;
+          setSession({
+            roomCode: message.payload.roomCode,
+            memberId: message.payload.memberId,
+            memberToken: message.payload.memberToken,
+            joinToken,
+          });
+          setNotice("已加入情侣房间");
+          return;
+        }
+        case "room:state": {
+          setRoomState(message.payload);
+          setError(null);
+          return;
+        }
+        case "room:member-joined":
+        case "room:member-left": {
+          const member = message.payload.member;
+          setRoomState((current) => {
+            if (!current || current.roomCode !== message.payload.roomCode) {
+              return current;
+            }
+            if (message.type === "room:member-joined") {
+              const members = current.members.some(
+                (item) => item.id === member.id,
+              )
+                ? current.members
+                : [...current.members, member];
+              return { ...current, members };
+            }
+            return {
+              ...current,
+              members: current.members.filter((item) => item.id !== member.id),
+            };
+          });
+          return;
+        }
+        case "error":
+          failPendingCachedVideo(message.payload.message);
+          setError(message.payload.message);
+          return;
+        case "sync:pong":
+          return;
+      }
+    },
+    [failPendingCachedVideo],
+  );
 
   const connect = useCallback(
     (onOpen: (socket: WebSocket) => void) => {
@@ -774,11 +871,12 @@ export default function App() {
         }
       });
       socket.addEventListener("error", () => {
+        failPendingCachedVideo("WebSocket 连接失败，请重试");
         setError("WebSocket 连接失败");
         setStatus("closed");
       });
     },
-    [handleServerMessage],
+    [failPendingCachedVideo, handleServerMessage],
   );
 
   const displayName = authProfile.displayName ?? "Web 观众";
@@ -893,9 +991,77 @@ export default function App() {
     });
   }, [loadPlaybackSource, sessionKey, sharedVideoSourceKey]);
 
+  const resolveAndShareVideo = useCallback(
+    async (args: {
+      input: string;
+      currentSession: RoomSession;
+      title?: string;
+      successNotice?: string;
+    }): Promise<boolean> => {
+      const videoElement = videoRef.current;
+      setIsResolvingVideo(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const body = isDirectMediaInput(args.input)
+          ? { url: args.input, ...(args.title ? { title: args.title } : {}) }
+          : {
+              input: args.input,
+              roomCode: args.currentSession.roomCode,
+              memberToken: args.currentSession.memberToken,
+            };
+        const response = await fetch("/api/web/video/resolve", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(body),
+        });
+        const payload = (await response.json()) as ResolveVideoResponse;
+        if (!response.ok || !payload.ok || !payload.data) {
+          setError(resolveVideoErrorMessage(response.status, payload));
+          return false;
+        }
+
+        autoplayAfterResolveRef.current = true;
+        setActiveVariantIndex(0);
+        setManifest(
+          attachRoomCredentialsToManifest(
+            payload.data.playbackSource,
+            args.currentSession,
+          ),
+        );
+        sendMessage({
+          type: "video:share",
+          payload: {
+            memberToken: args.currentSession.memberToken,
+            video: payload.data.video,
+            playback: {
+              url: payload.data.video.url,
+              currentTime: 0,
+              playState: "playing",
+              playbackRate: videoElement?.playbackRate ?? 1,
+              updatedAt: Date.now(),
+              serverTime: 0,
+              actorId: args.currentSession.memberId,
+              seq: sequenceRef.current++,
+              userInitiated: true,
+            },
+          },
+        });
+        setNotice(args.successNotice ?? "解析成功，正在加载播放器");
+        return true;
+      } catch {
+        setError("解析失败，请稍后重试");
+        return false;
+      } finally {
+        setIsResolvingVideo(false);
+      }
+    },
+    [sendMessage],
+  );
+
   const shareVideo = useCallback(async () => {
     const currentSession = sessionRef.current;
-    const videoElement = videoRef.current;
     const input = videoInput.trim();
     if (!currentSession) {
       setError("请先创建或加入房间");
@@ -906,62 +1072,59 @@ export default function App() {
       return;
     }
 
-    setIsResolvingVideo(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const body = isDirectMediaInput(input)
-        ? { url: input }
-        : {
-            input,
-            roomCode: currentSession.roomCode,
-            memberToken: currentSession.memberToken,
-          };
-      const response = await fetch("/api/web/video/resolve", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify(body),
-      });
-      const payload = (await response.json()) as ResolveVideoResponse;
-      if (!response.ok || !payload.ok || !payload.data) {
-        setError(resolveVideoErrorMessage(response.status, payload));
+    await resolveAndShareVideo({ input, currentSession });
+  }, [resolveAndShareVideo, videoInput]);
+
+  useEffect(() => {
+    const pending = pendingCachedVideoRef.current;
+    if (
+      !pending ||
+      !session ||
+      !shouldResolvePendingCachedVideo(pending.previousMemberToken, session)
+    ) {
+      return;
+    }
+    pendingCachedVideoRef.current = null;
+    if (pendingCachedRoomTimeoutRef.current !== null) {
+      window.clearTimeout(pendingCachedRoomTimeoutRef.current);
+      pendingCachedRoomTimeoutRef.current = null;
+    }
+    setWorkspaceView("player");
+    void resolveAndShareVideo({
+      input: createCachedVideoPlaybackUrl(
+        pending.video,
+        window.location.origin,
+      ),
+      currentSession: session,
+      title: pending.video.title,
+      successNotice: "房间已创建，缓存视频正在加载",
+    }).finally(() => setCreatingCachedVideoId(null));
+  }, [resolveAndShareVideo, session]);
+
+  const startCachedVideoRoom = useCallback(
+    (video: CachedVideoSummary) => {
+      if (creatingCachedVideoId !== null) {
         return;
       }
-
-      autoplayAfterResolveRef.current = true;
-      setActiveVariantIndex(0);
-      setManifest(
-        attachRoomCredentialsToManifest(
-          payload.data.playbackSource,
-          currentSession,
-        ),
-      );
-      sendMessage({
-        type: "video:share",
-        payload: {
-          memberToken: currentSession.memberToken,
-          video: payload.data.video,
-          playback: {
-            url: payload.data.video.url,
-            currentTime: 0,
-            playState: "playing",
-            playbackRate: videoElement?.playbackRate ?? 1,
-            updatedAt: Date.now(),
-            serverTime: 0,
-            actorId: currentSession.memberId,
-            seq: sequenceRef.current++,
-            userInitiated: true,
-          },
-        },
-      });
-      setNotice("解析成功，正在加载播放器");
-    } catch {
-      setError("解析失败，请稍后重试");
-    } finally {
-      setIsResolvingVideo(false);
-    }
-  }, [sendMessage, videoInput]);
+      pendingCachedVideoRef.current = {
+        video,
+        previousMemberToken: sessionRef.current?.memberToken ?? null,
+      };
+      setCreatingCachedVideoId(video.id);
+      setCachedVideosError(null);
+      if (pendingCachedRoomTimeoutRef.current !== null) {
+        window.clearTimeout(pendingCachedRoomTimeoutRef.current);
+      }
+      pendingCachedRoomTimeoutRef.current = window.setTimeout(() => {
+        pendingCachedVideoRef.current = null;
+        pendingCachedRoomTimeoutRef.current = null;
+        setCreatingCachedVideoId(null);
+        setCachedVideosError("创建房间超时，请重试");
+      }, 15_000);
+      createRoom();
+    },
+    [createRoom, creatingCachedVideoId],
+  );
 
   const rememberPlaybackForSourceSwitch = useCallback(() => {
     const video = videoRef.current;
@@ -1558,82 +1721,208 @@ export default function App() {
       <section className="watch-stage" aria-label="同步播放器">
         <div className="top-bar">
           <div>
-            <p className="eyebrow">AUTO ALIGNED PLAYBACK</p>
-            <h2>{roomState?.sharedVideo?.title ?? "等待分享视频"}</h2>
+            <p className="eyebrow">
+              {workspaceView === "player"
+                ? "AUTO ALIGNED PLAYBACK"
+                : "CACHED VIDEO LIBRARY"}
+            </p>
+            <h2>
+              {workspaceView === "player"
+                ? (roomState?.sharedVideo?.title ?? "等待分享视频")
+                : "已缓存视频"}
+            </h2>
           </div>
-          <button type="button" onClick={realignLocal}>
-            <RefreshCw size={18} />
-            重新对齐
-          </button>
-        </div>
-
-        <div className="video-frame">
-          {activeVariant ? null : (
-            <div className="empty-player">
-              <LoaderCircle size={24} />
-              <span>等待播放源</span>
+          <div className="stage-actions">
+            <div className="workspace-tabs" role="tablist" aria-label="主视图">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={workspaceView === "player"}
+                className={workspaceView === "player" ? "is-active" : ""}
+                onClick={() => setWorkspaceView("player")}
+              >
+                <Play size={16} />
+                同步播放
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={workspaceView === "library"}
+                className={workspaceView === "library" ? "is-active" : ""}
+                onClick={() => setWorkspaceView("library")}
+              >
+                <HardDrive size={16} />
+                已缓存视频
+              </button>
             </div>
-          )}
-          <video
-            ref={videoRef}
-            controls
-            playsInline
-            poster={manifest?.posterUrl}
-            onPlay={() => {
-              fallbackTimerRef.current?.markPlayable();
-              sendPlaybackUpdate();
-            }}
-            onCanPlay={() => fallbackTimerRef.current?.markPlayable()}
-            onWaiting={() => fallbackTimerRef.current?.armStallTimeout()}
-            onStalled={() => fallbackTimerRef.current?.armStallTimeout()}
-            onPause={() => sendPlaybackUpdate()}
-            onSeeked={() => sendPlaybackUpdate("explicit-seek")}
-            onTimeUpdate={() => {
-              setNowPlayingTime(videoRef.current?.currentTime ?? 0);
-            }}
-            onError={() => {
-              void fallbackPlaybackSource("media-error");
-            }}
-          />
-        </div>
-
-        <div className="now-bar">
-          <div>
-            <p>{activeVariant ? activeVariant.label : "无播放源"}</p>
-            <span>自动本地对齐开启，不会定时向服务器上报进度</span>
-          </div>
-          <div className="transport-state">
-            {roomState?.playback?.playState === "playing" ? (
-              <Play size={18} />
-            ) : (
-              <Pause size={18} />
-            )}
-            <span>{formatTime(nowPlayingTime)}</span>
-          </div>
-        </div>
-
-        {notice ? <p className="notice-line">{notice}</p> : null}
-        {error ? (
-          <div className="error-line playback-error-line">
-            <span>{error}</span>
-            {session && roomState?.sharedVideo ? (
-              <button type="button" onClick={() => void retryPlaybackSource()}>
-                重新获取播放地址
+            {workspaceView === "player" ? (
+              <button type="button" onClick={realignLocal}>
+                <RefreshCw size={18} />
+                重新对齐
               </button>
             ) : null}
           </div>
-        ) : null}
-
-        <div className="rules-row">
-          <span>
-            <Link2 size={15} />
-            播放 / 暂停 / 拖拽触发同步
-          </span>
-          <span>
-            <RefreshCw size={15} />
-            本地每秒自动检测偏差
-          </span>
         </div>
+
+        <div className="player-workspace" hidden={workspaceView !== "player"}>
+          <div className="video-frame">
+            {activeVariant ? null : (
+              <div className="empty-player">
+                <LoaderCircle size={24} />
+                <span>等待播放源</span>
+              </div>
+            )}
+            <video
+              ref={videoRef}
+              controls
+              playsInline
+              poster={manifest?.posterUrl}
+              onPlay={() => {
+                fallbackTimerRef.current?.markPlayable();
+                sendPlaybackUpdate();
+              }}
+              onCanPlay={() => fallbackTimerRef.current?.markPlayable()}
+              onWaiting={() => fallbackTimerRef.current?.armStallTimeout()}
+              onStalled={() => fallbackTimerRef.current?.armStallTimeout()}
+              onPause={() => sendPlaybackUpdate()}
+              onSeeked={() => sendPlaybackUpdate("explicit-seek")}
+              onTimeUpdate={() => {
+                setNowPlayingTime(videoRef.current?.currentTime ?? 0);
+              }}
+              onError={() => {
+                void fallbackPlaybackSource("media-error");
+              }}
+            />
+          </div>
+
+          <div className="now-bar">
+            <div>
+              <p>{activeVariant ? activeVariant.label : "无播放源"}</p>
+              <span>自动本地对齐开启，不会定时向服务器上报进度</span>
+            </div>
+            <div className="transport-state">
+              {roomState?.playback?.playState === "playing" ? (
+                <Play size={18} />
+              ) : (
+                <Pause size={18} />
+              )}
+              <span>{formatTime(nowPlayingTime)}</span>
+            </div>
+          </div>
+
+          {notice ? <p className="notice-line">{notice}</p> : null}
+          {error ? (
+            <div className="error-line playback-error-line">
+              <span>{error}</span>
+              {session && roomState?.sharedVideo ? (
+                <button
+                  type="button"
+                  onClick={() => void retryPlaybackSource()}
+                >
+                  重新获取播放地址
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="rules-row">
+            <span>
+              <Link2 size={15} />
+              播放 / 暂停 / 拖拽触发同步
+            </span>
+            <span>
+              <RefreshCw size={15} />
+              本地每秒自动检测偏差
+            </span>
+          </div>
+        </div>
+
+        <section
+          className="library-workspace"
+          hidden={workspaceView !== "library"}
+          aria-label="已缓存视频列表"
+        >
+          <div className="library-toolbar">
+            <p>
+              {cachedVideos.length > 0
+                ? `${cachedVideos.length} 个可播放文件`
+                : "服务器本地媒体"}
+            </p>
+            <button
+              type="button"
+              className="icon-button"
+              title="刷新视频列表"
+              disabled={cachedVideosLoading}
+              onClick={() => void loadCachedVideos()}
+            >
+              <RefreshCw
+                className={cachedVideosLoading ? "spin-icon" : undefined}
+                size={18}
+              />
+            </button>
+          </div>
+
+          {!cachedVideosEnabled ? (
+            <div className="library-empty">
+              <HardDrive size={28} />
+              <strong>缓存视频目录尚未配置</strong>
+            </div>
+          ) : cachedVideosLoading && cachedVideos.length === 0 ? (
+            <div className="library-empty">
+              <LoaderCircle className="spin-icon" size={28} />
+              <strong>正在读取视频目录</strong>
+            </div>
+          ) : cachedVideos.length === 0 && !cachedVideosError ? (
+            <div className="library-empty">
+              <Film size={28} />
+              <strong>暂无已缓存视频</strong>
+            </div>
+          ) : null}
+
+          {cachedVideosError ? (
+            <div className="error-line library-error">
+              <span>{cachedVideosError}</span>
+              <button type="button" onClick={() => void loadCachedVideos()}>
+                重试
+              </button>
+            </div>
+          ) : null}
+
+          {cachedVideos.length > 0 ? (
+            <div className="cached-video-list">
+              {cachedVideos.map((video) => {
+                const creating = creatingCachedVideoId === video.id;
+                return (
+                  <article className="cached-video-row" key={video.id}>
+                    <span className="cached-video-icon" aria-hidden="true">
+                      <Film size={20} />
+                    </span>
+                    <div className="cached-video-copy">
+                      <h3>{video.title}</h3>
+                      <p>
+                        <span>{formatFileSize(video.size)}</span>
+                        <span>{formatUpdatedAt(video.updatedAt)}</span>
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="primary cached-video-play"
+                      disabled={creatingCachedVideoId !== null}
+                      onClick={() => startCachedVideoRoom(video)}
+                    >
+                      {creating ? (
+                        <LoaderCircle className="spin-icon" size={18} />
+                      ) : (
+                        <Play size={18} />
+                      )}
+                      {creating ? "正在建房" : "播放并创建房间"}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
       </section>
 
       {qrDialogOpen ? (
