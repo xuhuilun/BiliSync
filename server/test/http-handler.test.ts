@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,7 +27,7 @@ function createRequest(args: {
   range?: string;
   body?: string;
 }) {
-  return {
+  return Object.assign(new EventEmitter(), {
     url: args.url,
     method: args.method ?? "GET",
     headers: {
@@ -42,7 +43,7 @@ function createRequest(args: {
         yield Buffer.from(args.body);
       }
     },
-  } as IncomingMessage;
+  }) as IncomingMessage;
 }
 
 function createResponse() {
@@ -353,6 +354,26 @@ function mediaResponse(args: {
         content.byteOffset + content.byteLength,
       ),
   };
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function createHandler(adminHandled = false) {
@@ -1814,6 +1835,83 @@ test("web bilibili media proxy remembers the successful backup for the next Rang
   ]);
 });
 
+test("web bilibili media proxy aborts the pending upstream when the client disconnects before headers", async () => {
+  let releaseUpstreamStarted: (() => void) | undefined;
+  const upstreamStarted = new Promise<void>((resolve) => {
+    releaseUpstreamStarted = resolve;
+  });
+  let releaseUpstreamAborted: (() => void) | undefined;
+  const upstreamAborted = new Promise<void>((resolve) => {
+    releaseUpstreamAborted = resolve;
+  });
+  let backupCalls = 0;
+  const { handler, attempts } = createMediaFailoverHarness({
+    mediaUpstreamTimeoutMs: 200,
+    mediaFetch: async (url, init) => {
+      if (url === BACKUP_MEDIA_URL) {
+        backupCalls += 1;
+        return mediaResponse({ status: 200 });
+      }
+      releaseUpstreamStarted?.();
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            releaseUpstreamAborted?.();
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
+      });
+    },
+  });
+  await issueMediaToken(handler);
+  let releaseHandlerFinished: (() => void) | undefined;
+  const handlerFinished = new Promise<void>((resolve) => {
+    releaseHandlerFinished = resolve;
+  });
+  let handledRequest: IncomingMessage | undefined;
+  let handledResponse: ServerResponse | undefined;
+  const server = createServer((request, response) => {
+    handledRequest = request;
+    handledResponse = response;
+    void handler(request, response).finally(() => releaseHandlerFinished?.());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const startedAt = Date.now();
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port: address.port,
+      path: "/api/web/media/media-token-123456/video.mp4?roomCode=ABC123&memberToken=member-token",
+      headers: { origin: "chrome-extension://allowed" },
+    });
+    request.on("error", () => undefined);
+    request.end();
+    await upstreamStarted;
+    request.destroy();
+
+    await withTimeout(
+      Promise.all([upstreamAborted, handlerFinished]),
+      100,
+      "client abort was not propagated promptly",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
+  assert.equal(backupCalls, 0);
+  assert.deepEqual(attempts, []);
+  assert.ok(Date.now() - startedAt < 150);
+  assert.equal(handledRequest?.listenerCount("aborted"), 0);
+  assert.equal(handledResponse?.listenerCount("close"), 0);
+});
+
 test("web bilibili media proxy cancels the upstream Web Stream when the client aborts", async () => {
   let releaseCancelled: (() => void) | undefined;
   const cancelled = new Promise<void>((resolve) => {
@@ -1866,15 +1964,7 @@ test("web bilibili media proxy cancels the upstream Web Stream when the client a
       request.once("error", reject);
       request.end();
     });
-    await Promise.race([
-      cancelled,
-      new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error("upstream body was not cancelled")),
-          500,
-        ),
-      ),
-    ]);
+    await withTimeout(cancelled, 500, "upstream body was not cancelled");
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

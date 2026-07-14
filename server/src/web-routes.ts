@@ -23,6 +23,7 @@ const DIRECT_SOURCE_TTL_MS = 20 * 60 * 1000;
 const BILIBILI_AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const BILIBILI_MEDIA_TOKEN_TTL_MS = 20 * 60 * 1000;
 const DEFAULT_MEDIA_UPSTREAM_TIMEOUT_MS = 10_000;
+const MEDIA_PROXY_CLIENT_ABORT = Symbol("media_proxy_client_abort");
 const BILIBILI_QR_LOGIN_TTL_MS = 180 * 1000;
 const MAX_JSON_BODY_BYTES = 16 * 1024;
 const MAX_TITLE_LENGTH = 128;
@@ -1759,6 +1760,16 @@ async function handleMediaProxy(args: {
     return;
   }
 
+  let clientAborted = args.request.aborted || args.response.destroyed;
+  let activeController: AbortController | undefined;
+  let rejectClientAbort: (() => void) | undefined;
+  const isClientAborted = () =>
+    clientAborted || args.request.aborted || args.response.destroyed;
+  const handleClientAbort = () => {
+    clientAborted = true;
+    activeController?.abort();
+    rejectClientAbort?.();
+  };
   const headers = buildBilibiliHeaders(token.cookie, token.referer);
   const range = args.request.headers.range;
   if (typeof range === "string") {
@@ -1772,60 +1783,93 @@ async function handleMediaProxy(args: {
       .filter((index) => index !== token.preferredIndex),
   ];
   let upstream: BilibiliFetchResponse | undefined;
-  for (const candidateIndex of candidateIndexes) {
-    const source: WebMediaProxyUpstreamSource =
-      candidateIndex === 0 ? "primary" : "backup";
-    const controller = new AbortController();
-    const startedAt = Date.now();
-    let timedOut = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const responseHeaderTimeout = new Promise<never>((_, reject) => {
-      timeout = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-        reject(new Error("media_upstream_timeout"));
-      }, args.mediaUpstreamTimeoutMs);
-    });
-    try {
-      const candidate = await Promise.race([
-        args.fetchImpl(token.urls[candidateIndex], {
-          headers: { ...headers },
-          signal: controller.signal,
-        }),
-        responseHeaderTimeout,
-      ]);
-      if (candidate.status !== 200 && candidate.status !== 206) {
-        try {
-          void candidate.body?.cancel().catch(() => undefined);
-        } catch {
-          // Best effort: the response is already unusable for proxying.
+  args.request.once("aborted", handleClientAbort);
+  args.response.once("close", handleClientAbort);
+  try {
+    for (const candidateIndex of candidateIndexes) {
+      if (isClientAborted()) {
+        break;
+      }
+      const source: WebMediaProxyUpstreamSource =
+        candidateIndex === 0 ? "primary" : "backup";
+      const controller = new AbortController();
+      activeController = controller;
+      const startedAt = Date.now();
+      let timedOut = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const responseHeaderTimeout = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error("media_upstream_timeout"));
+        }, args.mediaUpstreamTimeoutMs);
+      });
+      const clientAbort = new Promise<never>((_, reject) => {
+        rejectClientAbort = () => reject(MEDIA_PROXY_CLIENT_ABORT);
+      });
+      try {
+        const candidate = await Promise.race([
+          args.fetchImpl(token.urls[candidateIndex], {
+            headers: { ...headers },
+            signal: controller.signal,
+          }),
+          responseHeaderTimeout,
+          clientAbort,
+        ]);
+        if (isClientAborted()) {
+          try {
+            void candidate.body?.cancel().catch(() => undefined);
+          } catch {
+            // Best effort: the client has already disconnected.
+          }
+          break;
+        }
+        if (candidate.status !== 200 && candidate.status !== 206) {
+          try {
+            void candidate.body?.cancel().catch(() => undefined);
+          } catch {
+            // Best effort: the response is already unusable for proxying.
+          }
+          args.mediaMetrics?.recordProxyUpstreamAttempt(
+            source,
+            "http_error",
+            Date.now() - startedAt,
+          );
+          continue;
+        }
+        upstream = candidate;
+        token.preferredIndex = candidateIndex;
+        args.mediaMetrics?.recordProxyUpstreamAttempt(
+          source,
+          "success",
+          Date.now() - startedAt,
+        );
+        break;
+      } catch (reason) {
+        if (reason === MEDIA_PROXY_CLIENT_ABORT || isClientAborted()) {
+          break;
         }
         args.mediaMetrics?.recordProxyUpstreamAttempt(
           source,
-          "http_error",
+          timedOut ? "timeout" : "network_error",
           Date.now() - startedAt,
         );
-        continue;
-      }
-      upstream = candidate;
-      token.preferredIndex = candidateIndex;
-      args.mediaMetrics?.recordProxyUpstreamAttempt(
-        source,
-        "success",
-        Date.now() - startedAt,
-      );
-      break;
-    } catch {
-      args.mediaMetrics?.recordProxyUpstreamAttempt(
-        source,
-        timedOut ? "timeout" : "network_error",
-        Date.now() - startedAt,
-      );
-    } finally {
-      if (timeout) {
-        clearTimeout(timeout);
+      } finally {
+        rejectClientAbort = undefined;
+        if (activeController === controller) {
+          activeController = undefined;
+        }
+        if (timeout) {
+          clearTimeout(timeout);
+        }
       }
     }
+  } finally {
+    args.request.off("aborted", handleClientAbort);
+    args.response.off("close", handleClientAbort);
+  }
+  if (isClientAborted()) {
+    return;
   }
   if (!upstream) {
     writeError(args.response, 502, "media_proxy_failed", "Media proxy failed.");
